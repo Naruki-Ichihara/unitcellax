@@ -1,0 +1,30 @@
+{
+    "name": "unitcellax",
+    "dockerComposeFile": "../docker-compose.yml",
+    "service": "unitcellax",
+    "workspaceFolder": "/workspace",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.flake8",
+                "ms-python.black-formatter",
+                "charliermarsh.ruff"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/bin/python3",
+                "[python]": {
+                    "editor.codeActionsOnSave": {
+                        "source.fixAll.ruff": "explicit",
+                        "source.organizeImports.ruff": "explicit"
+                    },
+                    "editor.formatOnSave": true,
+                    "editor.formatOnType": true
+                }
+            }
+        }
+    },
+    "remoteUser": "root",
+    "shutdownAction": "stopCompose",
+    "postCreateCommand": "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && apt-get install -y nodejs && npm install -g @anthropic-ai/claude-code"
+}
