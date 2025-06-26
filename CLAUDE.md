@@ -1,136 +1,105 @@
-## Core Development Rules
-This document contains critical information about working with this codebase. Follow these guidelines precisely.
-
-1. Package Management
-   - use pip
-
-2. Code Quality
-   - Type hints required for all code
-   - Public APIs must have docstrings
-   - Functions must be focused and small
-   - Follow existing patterns exactly
-   - Line length: 88 chars maximum
-
-3. Testing Requirements
-   - Framework: `pytest`
-   - New features require tests
-   - Bug fixes require regression tests
-
-## git
-   ```
-   git add .
-   git commit -m"<commit massage>"
-   git push origin main
-   ```
-
-
-## Python Tools
-
-## Error Resolution
-
-1. CI Failures
-   - Fix order:
-     1. Formatting
-     2. Type errors
-     3. Linting
-   - Type errors:
-     - Get full line context
-     - Check Optional types
-     - Add type narrowing
-     - Verify function signatures
-
-2. Common Issues
-   - Line length:
-     - Break strings with parentheses
-     - Multi-line function calls
-     - Split imports
-   - Types:
-     - Add None checks
-     - Narrow string types
-     - Match existing patterns
-
-3. Best Practices
-   - Run formatters before type checks
-   - Keep changes minimal
-   - Follow existing patterns
-   - Document public APIs
-   - Test thoroughly
-
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-unitcellax is a containerized development environment for computational physics/scientific computing, specifically designed to work with JAX, NumPy, and FEniCSx. The project is currently in its initial setup phase.
+unitcellax is a GPU-accelerated numerical material testing framework built with JAX for computational physics and scientific computing. The project uses a containerized development approach with NVIDIA JAX, NumPy, and the FEniCS ecosystem for finite element analysis.
 
-## Development Environment
+## Container-First Development
 
-This project is designed to be developed entirely within a Docker container that provides:
-- NVIDIA JAX with GPU support
-- Scientific computing libraries (NumPy 1.26.0)
-- FEniCS ecosystem for finite element analysis
-- GUI support through X11 forwarding
+This project is designed to be developed entirely within a Docker container. All development commands should be executed inside the container environment.
 
-### Container Setup
+### Essential Commands
 
-The development environment runs in a Docker container with GPU acceleration. To start the development environment:
-
+**Container Management:**
 ```bash
-docker compose build --no-cache 
-docker compose up
+# Build and start development environment
+docker compose build --no-cache
+docker compose up -d
+
+# Enter the container for development
+docker exec -it unitcellax /bin/bash
+
+# Stop the environment
+docker compose down
 ```
 
-The container mounts the project directory to `/workspace/` and provides:
-- GPU access via NVIDIA runtime
-- X11 forwarding for GUI applications
-- WSL2 integration for Windows development
-- 4GB shared memory for computational tasks
+**Inside Container Setup:**
+```bash
+# Install FEniCS (required manual step due to MPI issues)
+apt install -y fenicsx
 
-### Important Notes
+# Verify GPU access
+nvidia-smi
 
-- FEniCS must be installed manually inside the container (see Dockerfile:15-16 comment about MPI setup issues)
-- The container uses the official NVIDIA JAX image as base (nvcr.io/nvidia/jax:25.04-py3)
-- All development should happen inside the container to ensure consistency
-- Working directory inside container is `/workspace/` (mounted from host project root)
+# Package installation
+pip install -e .
 
-## Project Structure
+# Install pytest for testing
+pip install pytest
+```
 
-Currently minimal structure:
-- `Dockerfile`: Container definition with scientific computing stack
-- `docker-compose.yml`: Development environment orchestration
-- `README.md`: Basic project information
-- `LICENSE`: Project license
+### Python Package Structure
+
+The project uses setuptools with configuration split across:
+- `setup.py`: Minimal entry point
+- `setup.cfg`: Main package metadata and dependencies
+- `pyproject.toml`: Build system configuration with setuptools_scm for versioning
+
+**Key Dependencies:**
+- Core scientific stack: numpy==1.26.0 (pinned for FEniCS compatibility), scipy, matplotlib, meshio
+- Finite element: petsc4py, gmsh  
+- Optimization: nlopt
+- Runtime: JAX (GPU-enabled), FEniCS
+
+## Architecture
+
+The codebase follows a scientific computing architecture:
+- **Container Base:** NVIDIA JAX image (nvcr.io/nvidia/jax:25.04-py3) with GPU support
+- **Development Environment:** Full X11 forwarding for GUI applications, 4GB shared memory for computational workloads
+- **Package Structure:** Single `unitcellax/` package with version management via setuptools_scm
+
+### Important Constraints
+
+1. **FEniCS Installation:** Must be installed manually inside container due to MPI setup conflicts (see Dockerfile:24-25)
+2. **NumPy Version:** Pinned to 1.26.0 in setup.cfg for FEniCS binary compatibility - do not upgrade
+3. **GPU Dependencies:** All computational work assumes NVIDIA GPU availability
+4. **Container Isolation:** Host file system mounted at `/workspace/` - all paths should be relative to this
+5. **Display Support:** Container configured for WSL2 integration and X11 forwarding
 
 ## Development Workflow
 
-Since this is a container-first project, all commands should be run inside the Docker container:
+1. Start container and enter development environment
+2. Install FEniCS manually if not present
+3. Install package in development mode: `pip install -e .`
+4. Work within `/workspace/` (mounted from host)
+5. Test GPU functionality with computational workloads
+6. Consider MPI requirements for parallel computing tasks
 
-1. Start the container: `docker compose up -d`
-2. Enter the container: `docker exec -it unitcellax /bin/bash`
-3. Install FEniCS manually if needed: `apt install -y fenicsx` (inside container)
-4. Work in `/workspace/` directory (mounted from host)
+### Testing
 
-### Common Commands
+**Environment Validation:**
+```bash
+# Run all environment tests
+pytest tests/test_environment.py -v
 
-- **Rebuild container after Dockerfile changes**: `docker compose build --no-cache`
-- **Stop container**: `docker compose down`
-- **View container logs**: `docker compose logs unitcellax`
-- **Check GPU access inside container**: `nvidia-smi`
+# Run specific test categories
+pytest tests/test_environment.py::TestCoreDependencies -v
+pytest tests/test_environment.py::TestGPUEnvironment -v
+pytest tests/test_environment.py::TestFEniCSEnvironment -v
 
-## Container Configuration
+# Quick environment check (run directly)
+python tests/test_environment.py
+```
 
-The Docker setup includes:
-- GPU access with all NVIDIA capabilities
-- Display forwarding for GUI applications
-- Volume mounting for persistent development
-- IPC host mode for inter-process communication
-- 4GB shared memory allocation
+**Test Categories:**
+- **Environment Setup**: Container configuration, display support, working directory
+- **Core Dependencies**: NumPy, JAX, SciPy, matplotlib, meshio, petsc4py, gmsh, nlopt
+- **GPU Environment**: NVIDIA driver, JAX GPU support, GPU computations
+- **FEniCS Environment**: dolfinx, ufl availability and basic functionality
+- **Package Structure**: unitcellax package import and versioning
 
-## Future Development
+### Claude Code Integration
 
-The project appears to be in early stages. When adding code:
-- Consider the scientific computing focus (JAX/NumPy/FEniCS)
-- Maintain containerized development approach
-- Test GPU functionality for computational workloads
-- Consider MPI requirements for parallel computing
+The container can optionally include Claude Code by setting `INSTALL_CLAUDE: "true"` in docker-compose.yml. This installs Node.js and the Claude Code CLI within the container environment.
