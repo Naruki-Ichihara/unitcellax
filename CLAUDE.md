@@ -67,6 +67,7 @@ The codebase follows a scientific computing architecture:
 3. **GPU Dependencies:** All computational work assumes NVIDIA GPU availability
 4. **Container Isolation:** Host file system mounted at `/workspace/` - all paths should be relative to this
 5. **Display Support:** Container configured for WSL2 integration and X11 forwarding
+6. **Warnings:** SWIG-related warnings from nlopt are automatically suppressed via warnings_config.py
 
 ## Development Workflow
 
@@ -79,19 +80,48 @@ The codebase follows a scientific computing architecture:
 
 ### Testing
 
-**Environment Validation:**
+The test suite enforces environment validation before functional tests to ensure proper setup.
+
+**Standard Test Execution:**
 ```bash
-# Run all environment tests
+# Run all tests (environment tests run first automatically)
+pytest tests/ -v
+
+# Run only environment validation tests
 pytest tests/test_environment.py -v
 
-# Run specific test categories
-pytest tests/test_environment.py::TestCoreDependencies -v
-pytest tests/test_environment.py::TestGPUEnvironment -v
-pytest tests/test_environment.py::TestFEniCSEnvironment -v
+# Run only basis function tests (requires env validation)
+pytest tests/test_basis.py -v
 
 # Quick environment check (run directly)
 python tests/test_environment.py
 ```
+
+**Advanced Test Options:**
+```bash
+# Run specific test categories
+pytest tests/test_environment.py::TestCoreDependencies -v
+pytest tests/test_environment.py::TestGPUEnvironment -v
+pytest tests/test_environment.py::TestFEniCSEnvironment -v
+pytest tests/test_basis.py::TestGetElements -v
+
+# Run tests by marker
+pytest -m env_validation -v          # Environment tests only
+pytest -m gpu -v                     # GPU-specific tests only  
+pytest -m integration -v             # Integration tests only
+
+# Show all warnings (for debugging)
+pytest tests/ -v --disable-warnings
+
+# Run with custom verbosity
+pytest tests/ -vv --tb=short
+```
+
+**Test Execution Order:**
+1. **Environment validation** tests run first (automatic)
+2. **Dependency verification** follows specific priority order
+3. **Integration tests** run only after environment is validated
+4. **Test failures** in environment validation may abort remaining tests
 
 **Test Categories:**
 - **Environment Setup**: Container configuration, display support, working directory
@@ -99,6 +129,7 @@ python tests/test_environment.py
 - **GPU Environment**: NVIDIA driver, JAX GPU support, GPU computations
 - **FEniCS Environment**: dolfinx, ufl availability and basic functionality
 - **Package Structure**: unitcellax package import and versioning
+- **Basis Functions**: Element configuration, shape functions, face quadrature, reordering
 
 ### Claude Code Integration
 

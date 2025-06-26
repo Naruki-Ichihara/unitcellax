@@ -8,8 +8,17 @@ import os
 import sys
 import subprocess
 import platform
+import warnings
 from typing import Optional, Tuple
 import pytest
+
+# Filter out SWIG-related warnings at module level
+warnings.filterwarnings("ignore", message="builtin type SwigPyPacked has no __module__ attribute")
+warnings.filterwarnings("ignore", message="builtin type SwigPyObject has no __module__ attribute") 
+warnings.filterwarnings("ignore", message="builtin type swigvarlink has no __module__ attribute")
+
+# Mark all tests in this module as environment validation
+pytestmark = pytest.mark.env_validation
 
 
 class TestEnvironmentSetup:
@@ -138,6 +147,7 @@ class TestCoreDependencies:
             pytest.fail(f"nlopt not available: {e}")
 
 
+@pytest.mark.gpu
 class TestGPUEnvironment:
     """Test GPU availability and JAX GPU support."""
 

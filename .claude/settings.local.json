@@ -3,7 +3,8 @@
     "allow": [
       "Bash(find:*)",
       "Bash(sudo chmod:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(python:*)"
     ],
     "deny": []
   }
