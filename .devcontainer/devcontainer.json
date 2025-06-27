@@ -7,7 +7,7 @@
         "vscode": {
             "extensions": [
                 "ms-python.python",
-                "ms-python.black-formatter",
+                "ms-python.black-formatter"
             ],
             "settings": {
                 "python.defaultInterpreterPath": "/usr/bin/python3",
@@ -20,5 +20,5 @@
     },
     "remoteUser": "root",
     "shutdownAction": "stopCompose",
-    "postCreateCommand": "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && apt-get install -y nodejs && npm install -g @anthropic-ai/claude-code"
+    "postCreateCommand": "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && apt-get install -y nodejs && npm install -g @anthropic-ai/claude-code && apt install -y fenicsx"
 }

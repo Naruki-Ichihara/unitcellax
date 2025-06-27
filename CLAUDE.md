@@ -78,6 +78,37 @@ The codebase follows a scientific computing architecture:
 5. Test GPU functionality with computational workloads
 6. Consider MPI requirements for parallel computing tasks
 
+### Code Style and Documentation
+
+The codebase follows Google-style docstring conventions for all Python functions and classes. When writing or updating code:
+
+**Docstring Format:**
+- Use Google style docstrings for all functions, methods, and classes
+- Follow the format: brief description, Args section, Returns section, optional Raises/Examples sections
+- Use proper type hints in Args and Returns sections
+
+**Example:**
+```python
+def compute_shape_grads(self, points):
+    """Compute shape function gradients at given points.
+    
+    Args:
+        points (np.ndarray): Evaluation points with shape (num_points, dim).
+        
+    Returns:
+        np.ndarray: Shape function gradients with shape (num_points, num_nodes, dim).
+        
+    Raises:
+        ValueError: If points have incorrect dimensions.
+    """
+```
+
+**Key Guidelines:**
+- Prefer Google style over NumPy/SciPy style docstrings
+- Include type information in parentheses for all parameters and return values
+- Use clear, concise descriptions that explain the purpose and behavior
+- Document array shapes where relevant for scientific computing functions
+
 ### Testing
 
 The test suite enforces environment validation before functional tests to ensure proper setup.

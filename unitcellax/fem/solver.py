@@ -1,3 +1,46 @@
+"""Finite element solvers and solution algorithms.
+
+This module provides comprehensive solution algorithms for finite element problems,
+including linear solvers, nonlinear Newton-Raphson methods, boundary condition
+enforcement, and specialized continuation methods. It supports multiple backend
+solvers (JAX, SciPy/UMFPACK, PETSc) and advanced techniques like automatic
+differentiation and adjoint methods.
+
+The module includes:
+    - Linear solver interfaces (JAX, UMFPACK, PETSc)
+    - Nonlinear Newton-Raphson solver with line search
+    - Boundary condition enforcement via row elimination
+    - Arc-length continuation methods for path-following
+    - Dynamic relaxation for static equilibrium problems
+    - Automatic differentiation wrappers for sensitivity analysis
+    - Memory-efficient sparse matrix assembly
+
+Key Functions:
+    solver: Main nonlinear solver with Newton-Raphson iteration
+    linear_solver: Unified interface to multiple linear solvers
+    array_to_petsc_vec: Conversion utilities for PETSc integration
+    implicit_vjp: Adjoint method for parameter sensitivity
+    ad_wrapper: Automatic differentiation wrapper for optimization
+
+Example:
+    Basic nonlinear solver usage:
+    
+    >>> from unitcellax.fem.solver import solver
+    >>> from unitcellax.fem.problem import Problem
+    >>> 
+    >>> # Setup problem (see problem.py documentation)
+    >>> problem = Problem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=bcs)
+    >>> 
+    >>> # Solve with Newton-Raphson method
+    >>> solver_options = {'jax_solver': {'precond': True}, 'tol': 1e-6}
+    >>> solution = solver(problem, solver_options)
+
+Note:
+    This module requires JAX for automatic differentiation, PETSc for advanced
+    linear algebra, and SciPy for sparse matrix operations. GPU acceleration
+    is available through JAX when configured properly.
+"""
+
 import jax
 import jax.numpy as np
 import jax.flatten_util
@@ -8,27 +51,23 @@ import time
 from petsc4py import PETSc
 import gc
 
-from cellax.fem import logger
+from unitcellax.fem import logger
 
 from jax import config
+
 config.update("jax_enable_x64", True)
 CHUNK_SIZE = 100000000
 
+
 def array_to_petsc_vec(arr, size=None):
-    """
-    Convert a JAX or NumPy array to a PETSc.Vec.
+    """Convert a JAX or NumPy array to a PETSc.Vec.
 
-    Parameters
-    ----------
-    arr : array-like
-        JAX array (DeviceArray) or NumPy array of shape (N,)
-    size : int or None
-        If None, uses len(arr) as vector size
+    Args:
+        arr (array-like): JAX array (DeviceArray) or NumPy array of shape (N,).
+        size (int, optional): Vector size. If None, uses len(arr) as vector size.
 
-    Returns
-    -------
-    vec : PETSc.Vec
-        PETSc vector with values set from arr
+    Returns:
+        PETSc.Vec: PETSc vector with values set from arr.
     """
     arr_np = onp.array(arr).flatten()  # ensure NumPy, ensure 1D
     if size is None:
@@ -38,44 +77,58 @@ def array_to_petsc_vec(arr, size=None):
     vec.assemble()
     return vec
 
-################################################################################
-# JAX solver or scipy solver or PETSc solver
 
 def jax_solve(A, b, x0, precond):
     """Solves the equilibrium equation using a JAX solver.
 
-    Parameters
-    ----------
-    precond
-        Whether to calculate the preconditioner or not
+    Args:
+        A: System matrix.
+        b: Right-hand side vector.
+        x0: Initial guess.
+        precond (bool): Whether to calculate the preconditioner or not.
+
+    Returns:
+        Solution vector.
     """
     logger.debug(f"JAX Solver - Solving linear system")
     indptr, indices, data = A.getValuesCSR()
     A_sp_scipy = scipy.sparse.csr_array((data, indices, indptr), shape=A.getSize())
     A = BCOO.from_scipy_sparse(A_sp_scipy).sort_indices()
-    #logger.debug(f"...Generate BCOO in CPU. This may take a while for large systems.")
-    #with jax.default_device(jax.devices("cpu")[0]):
-    #    A_cpu = BCOO.from_scipy_sparse(A_sp_scipy).sort_indices()
-    #A = jax.device_put(A_cpu, device=jax.devices("gpu")[0])
     jacobi = np.array(A_sp_scipy.diagonal())
-    pc = lambda x: x * (1. / jacobi) if precond else None
-    x, info = jax.scipy.sparse.linalg.bicgstab(A,
-                                               b,
-                                               x0=x0,
-                                               M=pc,
-                                               tol=1e-10,
-                                               atol=1e-10,
-                                               maxiter=10000)
+    pc = lambda x: x * (1.0 / jacobi) if precond else None
+    x, info = jax.scipy.sparse.linalg.bicgstab(
+        A, b, x0=x0, M=pc, tol=1e-10, atol=1e-10, maxiter=10000
+    )
 
     # Verify convergence
     err = np.linalg.norm(A @ x - b)
     logger.debug(f"JAX Solver - Finshed solving, res = {err}")
     assert err < 0.1, f"JAX linear solver failed to converge with err = {err}"
-    x = np.where(err < 0.1, x, np.nan) # For assert purpose, some how this also affects bicgstab.
+    x = np.where(
+        err < 0.1, x, np.nan
+    )  # For assert purpose, some how this also affects bicgstab.
 
     return x
 
+
 def umfpack_solve(A, b):
+    """Solve linear system using SciPy's UMFPACK interface.
+    
+    Solves the linear system Ax = b using the UMFPACK sparse direct solver
+    through SciPy's interface. UMFPACK is typically faster and more robust
+    than iterative methods for moderately-sized problems.
+    
+    Args:
+        A (PETSc.Mat): Sparse system matrix in PETSc format.
+        b (np.ndarray): Right-hand side vector.
+        
+    Returns:
+        np.ndarray: Solution vector x.
+        
+    Note:
+        The function converts the PETSc matrix to SciPy CSR format internally.
+        Consider using the experimental JAX sparse solver for GPU acceleration.
+    """
     logger.debug(f"Scipy Solver - Solving linear system with UMFPACK")
     indptr, indices, data = A.getValuesCSR()
     Asp = scipy.sparse.csr_matrix((data, indices, indptr))
@@ -84,11 +137,42 @@ def umfpack_solve(A, b):
     # TODO: try https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.sparse.linalg.spsolve.html
     # x = jax.experimental.sparse.linalg.spsolve(av, aj, ai, b)
 
-    logger.debug(f'Scipy Solver - Finished solving, linear solve res = {np.linalg.norm(Asp @ x - b)}')
+    logger.debug(
+        f"Scipy Solver - Finished solving, linear solve res = {np.linalg.norm(Asp @ x - b)}"
+    )
     return x
 
 
 def petsc_solve(A, b, ksp_type, pc_type):
+    """Solve linear system using PETSc iterative solvers.
+    
+    Solves the linear system Ax = b using PETSc's iterative Krylov subspace
+    methods with preconditioning. Supports various solver and preconditioner
+    combinations for different problem types.
+    
+    Args:
+        A (PETSc.Mat): Sparse system matrix in PETSc format.
+        b (np.ndarray): Right-hand side vector.
+        ksp_type (str): Krylov subspace method type. Options include:
+            - 'bicgstab': Bi-conjugate gradient stabilized method
+            - 'gmres': Generalized minimal residual method
+            - 'tfqmr': Transpose-free quasi-minimal residual method
+            - 'minres': Minimal residual method
+        pc_type (str): Preconditioner type. Options include:
+            - 'ilu': Incomplete LU factorization
+            - 'jacobi': Jacobi (diagonal) preconditioning
+            - 'hypre': Algebraic multigrid via HYPRE
+            
+    Returns:
+        np.ndarray: Solution vector x.
+        
+    Raises:
+        AssertionError: If solver fails to converge to specified tolerance.
+        
+    Note:
+        For 'tfqmr' solver, automatically uses MUMPS factorization when available.
+        Convergence is verified by computing the residual norm.
+    """
     rhs = PETSc.Vec().createSeq(len(b))
     rhs.setValues(range(len(b)), onp.array(b))
     ksp = PETSc.KSP().create()
@@ -98,10 +182,12 @@ def petsc_solve(A, b, ksp_type, pc_type):
     ksp.pc.setType(pc_type)
 
     # TODO: This works better. Do we need to generalize the code a little bit?
-    if ksp_type == 'tfqmr':
-        ksp.pc.setFactorSolverType('mumps')
+    if ksp_type == "tfqmr":
+        ksp.pc.setFactorSolverType("mumps")
 
-    logger.debug(f'PETSc Solver - Solving linear system with ksp_type = {ksp.getType()}, pc = {ksp.pc.getType()}')
+    logger.debug(
+        f"PETSc Solver - Solving linear system with ksp_type = {ksp.getType()}, pc = {ksp.pc.getType()}"
+    )
     x = PETSc.Vec().createSeq(len(b))
     ksp.solve(rhs, x)
 
@@ -117,23 +203,69 @@ def petsc_solve(A, b, ksp_type, pc_type):
 
 
 def linear_solver(A, b, x0, solver_options):
+    """Unified interface for multiple linear solver backends.
+    
+    Provides a consistent interface to JAX, UMFPACK, PETSc, and custom linear
+    solvers. Automatically selects JAX solver if no specific solver is requested.
+    
+    Args:
+        A (PETSc.Mat): Sparse system matrix.
+        b (np.ndarray): Right-hand side vector.
+        x0 (np.ndarray): Initial guess for iterative solvers.
+        solver_options (dict): Solver configuration dictionary with possible keys:
+            - 'jax_solver': JAX iterative solver options
+            - 'umfpack_solver': UMFPACK direct solver options
+            - 'petsc_solver': PETSc iterative solver options
+            - 'custom_solver': User-defined solver function
+            
+    Returns:
+        np.ndarray: Solution vector x.
+        
+    Raises:
+        NotImplementedError: If no valid solver is specified in options.
+        
+    Example:
+        >>> options = {'jax_solver': {'precond': True}}
+        >>> x = linear_solver(A, b, x0, options)
+        
+        >>> options = {'petsc_solver': {'ksp_type': 'gmres', 'pc_type': 'ilu'}}
+        >>> x = linear_solver(A, b, x0, options)
+    """
 
     # If user does not specify any solver, set jax_solver as the default one.
-    if  len(solver_options.keys() & {'jax_solver', 'umfpack_solver', 'petsc_solver', 'custom_solver'}) == 0: 
-        solver_options['jax_solver'] = {}
+    if (
+        len(
+            solver_options.keys()
+            & {"jax_solver", "umfpack_solver", "petsc_solver", "custom_solver"}
+        )
+        == 0
+    ):
+        solver_options["jax_solver"] = {}
 
-    if 'jax_solver' in solver_options:      
-        precond = solver_options['jax_solver']['precond'] if 'precond' in solver_options['jax_solver'] else True
+    if "jax_solver" in solver_options:
+        precond = (
+            solver_options["jax_solver"]["precond"]
+            if "precond" in solver_options["jax_solver"]
+            else True
+        )
         x = jax_solve(A, b, x0, precond)
-    elif 'umfpack_solver' in solver_options:
+    elif "umfpack_solver" in solver_options:
         x = umfpack_solve(A, b)
-    elif 'petsc_solver' in solver_options:   
-        ksp_type = solver_options['petsc_solver']['ksp_type'] if 'ksp_type' in solver_options['petsc_solver'] else  'bcgsl' 
-        pc_type = solver_options['petsc_solver']['pc_type'] if 'pc_type' in solver_options['petsc_solver'] else 'ilu'
+    elif "petsc_solver" in solver_options:
+        ksp_type = (
+            solver_options["petsc_solver"]["ksp_type"]
+            if "ksp_type" in solver_options["petsc_solver"]
+            else "bcgsl"
+        )
+        pc_type = (
+            solver_options["petsc_solver"]["pc_type"]
+            if "pc_type" in solver_options["petsc_solver"]
+            else "ilu"
+        )
         x = petsc_solve(A, b, ksp_type, pc_type)
-    elif 'custom_solver' in solver_options:
+    elif "custom_solver" in solver_options:
         # Users can define their own solver
-        custom_solver = solver_options['custom_solver']
+        custom_solver = solver_options["custom_solver"]
         x = custom_solver(A, b, x0, solver_options)
     else:
         raise NotImplementedError(f"Unknown linear solver.")
@@ -144,7 +276,27 @@ def linear_solver(A, b, x0, solver_options):
 ################################################################################
 # "row elimination" solver
 
-def apply_bc_vec(res_vec, dofs, problem, scale=1.):
+
+def apply_bc_vec(res_vec, dofs, problem, scale=1.0):
+    """Apply Dirichlet boundary conditions to residual vector.
+    
+    Modifies the residual vector to enforce Dirichlet boundary conditions
+    using the row elimination method. This function directly modifies the
+    residual at constrained degrees of freedom.
+    
+    Args:
+        res_vec (np.ndarray): Global residual vector to modify.
+        dofs (np.ndarray): Current solution degrees of freedom.
+        problem (Problem): Finite element problem containing boundary condition data.
+        scale (float, optional): Scaling factor for boundary condition values. Defaults to 1.0.
+        
+    Returns:
+        np.ndarray: Modified residual vector with boundary conditions applied.
+        
+    Note:
+        This function implements the row elimination method where constrained
+        DOFs are set to (current_value - prescribed_value) * scale.
+    """
     res_list = problem.unflatten_fn_sol_list(res_vec)
     sol_list = problem.unflatten_fn_sol_list(dofs)
 
@@ -152,75 +304,152 @@ def apply_bc_vec(res_vec, dofs, problem, scale=1.):
         res = res_list[ind]
         sol = sol_list[ind]
         for i in range(len(fe.node_inds_list)):
-            res = (res.at[fe.node_inds_list[i], fe.vec_inds_list[i]].set(
-                sol[fe.node_inds_list[i], fe.vec_inds_list[i]], unique_indices=True))
-            res = res.at[fe.node_inds_list[i], fe.vec_inds_list[i]].add(-fe.vals_list[i]*scale)
+            res = res.at[fe.node_inds_list[i], fe.vec_inds_list[i]].set(
+                sol[fe.node_inds_list[i], fe.vec_inds_list[i]], unique_indices=True
+            )
+            res = res.at[fe.node_inds_list[i], fe.vec_inds_list[i]].add(
+                -fe.vals_list[i] * scale
+            )
 
         res_list[ind] = res
 
     return jax.flatten_util.ravel_pytree(res_list)[0]
 
 
-def apply_bc(res_fn, problem, scale=1.):
+def apply_bc(res_fn, problem, scale=1.0):
+    """Create a boundary condition-aware residual function.
+    
+    Wraps a residual function to automatically apply Dirichlet boundary
+    conditions using the row elimination method.
+    
+    Args:
+        res_fn (Callable): Original residual function that takes DOFs and returns residual.
+        problem (Problem): Finite element problem with boundary condition information.
+        scale (float, optional): Scaling factor for boundary conditions. Defaults to 1.0.
+        
+    Returns:
+        Callable: Modified residual function that enforces boundary conditions.
+        
+    Example:
+        >>> res_fn_bc = apply_bc(problem.compute_residual, problem)
+        >>> residual = res_fn_bc(dofs)
+    """
     def res_fn_bc(dofs):
-        """Apply Dirichlet boundary conditions
-        """
+        """Apply Dirichlet boundary conditions"""
         res_vec = res_fn(dofs)
         return apply_bc_vec(res_vec, dofs, problem, scale)
+
     return res_fn_bc
 
 
 def assign_bc(dofs, problem):
+    """Assign prescribed values to Dirichlet boundary condition DOFs.
+    
+    Sets the solution values at constrained degrees of freedom to their
+    prescribed Dirichlet boundary condition values.
+    
+    Args:
+        dofs (np.ndarray): Solution vector to modify.
+        problem (Problem): Finite element problem with boundary condition data.
+        
+    Returns:
+        np.ndarray: Modified solution vector with boundary conditions enforced.
+    """
     sol_list = problem.unflatten_fn_sol_list(dofs)
     for ind, fe in enumerate(problem.fes):
         sol = sol_list[ind]
         for i in range(len(fe.node_inds_list)):
-            sol = sol.at[fe.node_inds_list[i],
-                         fe.vec_inds_list[i]].set(fe.vals_list[i])
+            sol = sol.at[fe.node_inds_list[i], fe.vec_inds_list[i]].set(fe.vals_list[i])
         sol_list[ind] = sol
     return jax.flatten_util.ravel_pytree(sol_list)[0]
 
 
 def assign_ones_bc(dofs, problem):
+    """Set Dirichlet boundary condition DOFs to unity values.
+    
+    Utility function that sets all constrained degrees of freedom to 1.0.
+    Useful for testing and generating unit perturbations.
+    
+    Args:
+        dofs (np.ndarray): Solution vector to modify.
+        problem (Problem): Finite element problem with boundary condition data.
+        
+    Returns:
+        np.ndarray: Modified solution vector with boundary DOFs set to 1.0.
+    """
     sol_list = problem.unflatten_fn_sol_list(dofs)
     for ind, fe in enumerate(problem.fes):
         sol = sol_list[ind]
         for i in range(len(fe.node_inds_list)):
-            sol = sol.at[fe.node_inds_list[i],
-                         fe.vec_inds_list[i]].set(1.)
+            sol = sol.at[fe.node_inds_list[i], fe.vec_inds_list[i]].set(1.0)
         sol_list[ind] = sol
     return jax.flatten_util.ravel_pytree(sol_list)[0]
 
 
 def assign_zeros_bc(dofs, problem):
+    """Set Dirichlet boundary condition DOFs to zero values.
+    
+    Utility function that sets all constrained degrees of freedom to 0.0.
+    Useful for homogeneous boundary conditions and initialization.
+    
+    Args:
+        dofs (np.ndarray): Solution vector to modify.
+        problem (Problem): Finite element problem with boundary condition data.
+        
+    Returns:
+        np.ndarray: Modified solution vector with boundary DOFs set to 0.0.
+    """
     sol_list = problem.unflatten_fn_sol_list(dofs)
     for ind, fe in enumerate(problem.fes):
         sol = sol_list[ind]
         for i in range(len(fe.node_inds_list)):
-            sol = sol.at[fe.node_inds_list[i],
-                         fe.vec_inds_list[i]].set(0.)
+            sol = sol.at[fe.node_inds_list[i], fe.vec_inds_list[i]].set(0.0)
         sol_list[ind] = sol
     return jax.flatten_util.ravel_pytree(sol_list)[0]
 
 
 def copy_bc(dofs, problem):
+    """Extract boundary condition values to a new zero vector.
+    
+    Creates a new vector filled with zeros except at boundary condition
+    locations, where it copies the values from the input DOFs.
+    
+    Args:
+        dofs (np.ndarray): Source solution vector.
+        problem (Problem): Finite element problem with boundary condition data.
+        
+    Returns:
+        np.ndarray: New vector with only boundary DOF values copied.
+    """
     new_dofs = np.zeros_like(dofs)
     sol_list = problem.unflatten_fn_sol_list(dofs)
     new_sol_list = problem.unflatten_fn_sol_list(new_dofs)
-  
+
     for ind, fe in enumerate(problem.fes):
         sol = sol_list[ind]
         new_sol = new_sol_list[ind]
         for i in range(len(fe.node_inds_list)):
-            new_sol = (new_sol.at[fe.node_inds_list[i],
-                                  fe.vec_inds_list[i]].set(sol[fe.node_inds_list[i],
-                                          fe.vec_inds_list[i]]))
+            new_sol = new_sol.at[fe.node_inds_list[i], fe.vec_inds_list[i]].set(
+                sol[fe.node_inds_list[i], fe.vec_inds_list[i]]
+            )
         new_sol_list[ind] = new_sol
 
     return jax.flatten_util.ravel_pytree(new_sol_list)[0]
 
 
 def get_flatten_fn(fn_sol_list, problem):
+    """Create a flattened version of a solution list function.
+    
+    Converts a function that operates on solution lists to one that operates
+    on flattened DOF vectors, handling the conversion automatically.
+    
+    Args:
+        fn_sol_list (Callable): Function that takes solution list and returns values.
+        problem (Problem): Finite element problem with flattening utilities.
+        
+    Returns:
+        Callable: Function that takes flattened DOFs and returns flattened values.
+    """
 
     def fn_dofs(dofs):
         sol_list = problem.unflatten_fn_sol_list(dofs)
@@ -231,6 +460,22 @@ def get_flatten_fn(fn_sol_list, problem):
 
 
 def operator_to_matrix(operator_fn, problem):
+    """Convert a nonlinear operator to its Jacobian matrix.
+    
+    Computes the full Jacobian matrix of a nonlinear operator using automatic
+    differentiation. Primarily used for debugging and analysis.
+    
+    Args:
+        operator_fn (Callable): Nonlinear operator function.
+        problem (Problem): Finite element problem for size information.
+        
+    Returns:
+        np.ndarray: Dense Jacobian matrix.
+        
+    Warning:
+        This function computes a dense matrix and should only be used for
+        small problems or debugging purposes.
+    """
     """Only used for when debugging.
     Can be used to print the matrix, check the conditional number, etc.
     """
@@ -239,15 +484,32 @@ def operator_to_matrix(operator_fn, problem):
 
 
 def linear_incremental_solver(problem, res_vec, A, dofs, solver_options):
-    """
-    Linear solver at each Newton's iteration
+    """Solve linear system for Newton-Raphson increment.
+    
+    Computes the Newton increment by solving the linearized system at each
+    Newton iteration. Handles constraint enforcement and optional line search.
+    
+    Args:
+        problem (Problem): Finite element problem instance.
+        res_vec (np.ndarray): Current residual vector.
+        A (PETSc.Mat): Jacobian matrix at current solution state.
+        dofs (np.ndarray): Current solution degrees of freedom.
+        solver_options (dict): Solver configuration options.
+        
+    Returns:
+        np.ndarray: Updated solution after applying Newton increment.
+        
+    Note:
+        The function automatically constructs appropriate initial guesses
+        that satisfy boundary conditions and handles prolongation matrices
+        for constrained problems.
     """
     logger.debug(f"Solving linear system...")
     b = -res_vec
 
     # x0 will always be correct at boundary locations
     x0_1 = assign_bc(np.zeros(problem.num_total_dofs_all_vars), problem)
-    if hasattr(problem, 'prolongation_matrix'):
+    if problem.prolongation_matrix is not None:
         x0_2 = copy_bc(problem.prolongation_matrix @ dofs, problem)
         x0 = problem.prolongation_matrix.T @ (x0_1 - x0_2)
     else:
@@ -256,7 +518,11 @@ def linear_incremental_solver(problem, res_vec, A, dofs, solver_options):
 
     inc = linear_solver(A, b, x0, solver_options)
 
-    line_search_flag = solver_options['line_search_flag'] if 'line_search_flag' in solver_options else False
+    line_search_flag = (
+        solver_options["line_search_flag"]
+        if "line_search_flag" in solver_options
+        else False
+    )
     if line_search_flag:
         dofs = line_search(problem, dofs, inc)
     else:
@@ -266,15 +532,34 @@ def linear_incremental_solver(problem, res_vec, A, dofs, solver_options):
 
 
 def line_search(problem, dofs, inc):
-    """
-    TODO: This is useful for finite deformation plasticity.
+    """Perform line search to optimize Newton step size.
+    
+    Implements a simple backtracking line search to find an optimal step size
+    along the Newton direction. Particularly useful for finite deformation
+    problems and nonlinear material behavior.
+    
+    Args:
+        problem (Problem): Finite element problem instance.
+        dofs (np.ndarray): Current solution degrees of freedom.
+        inc (np.ndarray): Newton increment direction.
+        
+    Returns:
+        np.ndarray: Updated solution with optimized step size.
+        
+    Note:
+        Uses a simple halving strategy with a maximum of 3 iterations.
+        The implementation is basic and could be enhanced with more
+        sophisticated line search algorithms.
+        
+    Todo:
+        Implement more robust line search methods for finite deformation plasticity.
     """
     res_fn = problem.compute_residual
     res_fn = get_flatten_fn(res_fn, problem)
     res_fn = apply_bc(res_fn, problem)
 
     def res_norm_fn(alpha):
-        res_vec = res_fn(dofs + alpha*inc)
+        res_vec = res_fn(dofs + alpha * inc)
         return np.linalg.norm(res_vec)
 
     # grad_res_norm_fn = jax.grad(res_norm_fn)
@@ -290,38 +575,72 @@ def line_search(problem, dofs, inc):
     #     alpha = alpha - 1./hess_alpha*grad_alpha
     #     print(f"alpha = {alpha}, grad_alpha = {grad_alpha}, hess_alpha = {hess_alpha}")
 
-    alpha = 1.
+    alpha = 1.0
     res_norm = res_norm_fn(alpha)
     for i in range(3):
         alpha *= 0.5
         res_norm_half = res_norm_fn(alpha)
         logger.debug(f"i = {i}, res_norm = {res_norm}, res_norm_half = {res_norm_half}")
         if res_norm_half > res_norm:
-            alpha *= 2.
+            alpha *= 2.0
             break
         res_norm = res_norm_half
 
-    return dofs + alpha*inc
+    return dofs + alpha * inc
 
 
 def get_A(problem):
+    """Construct PETSc matrix with boundary condition enforcement.
+    
+    Converts the assembled sparse matrix to PETSc format and applies
+    boundary condition enforcement via row elimination. Handles
+    prolongation matrices for constraint enforcement.
+    
+    Args:
+        problem (Problem): Finite element problem with assembled sparse matrix.
+        
+    Returns:
+        PETSc.Mat or Tuple[PETSc.Mat, PETSc.Mat]: System matrix. If prolongation
+            matrix is present, returns both original and reduced matrices.
+            
+    Note:
+        The function zeros out rows corresponding to Dirichlet boundary
+        conditions and applies prolongation operations for multipoint constraints.
+    """
     A_sp_scipy = problem.csr_array
-    logger.info(f"Global sparse matrix takes about {A_sp_scipy.data.shape[0]*8*3/2**30} G memory to store.")
+    logger.info(
+        f"Global sparse matrix takes about {A_sp_scipy.data.shape[0]*8*3/2**30} G memory to store."
+    )
 
-    A = PETSc.Mat().createAIJ(size=A_sp_scipy.shape, 
-                              csr=(A_sp_scipy.indptr.astype(PETSc.IntType, copy=False),
-                                   A_sp_scipy.indices.astype(PETSc.IntType, copy=False), 
-                                   A_sp_scipy.data))
+    A = PETSc.Mat().createAIJ(
+        size=A_sp_scipy.shape,
+        csr=(
+            A_sp_scipy.indptr.astype(PETSc.IntType, copy=False),
+            A_sp_scipy.indices.astype(PETSc.IntType, copy=False),
+            A_sp_scipy.data,
+        ),
+    )
 
     for ind, fe in enumerate(problem.fes):
         for i in range(len(fe.node_inds_list)):
-            row_inds = onp.array(fe.node_inds_list[i] * fe.vec + fe.vec_inds_list[i] + problem.offset[ind], dtype=onp.int32)
+            row_inds = onp.array(
+                fe.node_inds_list[i] * fe.vec
+                + fe.vec_inds_list[i]
+                + problem.offset[ind],
+                dtype=onp.int32,
+            )
             A.zeroRows(row_inds)
 
     # Linear multipoint constraints
-    if hasattr(problem, 'prolongation_matrix'):
-        P = PETSc.Mat().createAIJ(size=problem.prolongation_matrix.shape, csr=(problem.prolongation_matrix.indptr.astype(PETSc.IntType, copy=False),
-                                                   problem.prolongation_matrix.indices.astype(PETSc.IntType, copy=False), problem.prolongation_matrix.data))
+    if problem.prolongation_matrix is not None:
+        P = PETSc.Mat().createAIJ(
+            size=problem.prolongation_matrix.shape,
+            csr=(
+                problem.prolongation_matrix.indptr.astype(PETSc.IntType, copy=False),
+                problem.prolongation_matrix.indices.astype(PETSc.IntType, copy=False),
+                problem.prolongation_matrix.data,
+            ),
+        )
 
         tmp = A.matMult(P)
         P_T = P.transpose()
@@ -330,88 +649,102 @@ def get_A(problem):
     return A
 
 
-################################################################################
-# The "row elimination" solver
-
 def solver(problem, solver_options={}):
-    """
-    Specify exactly either 'jax_solver' or 'umfpack_solver' or 'petsc_solver'
+    """Solve nonlinear finite element problem using Newton-Raphson method.
     
-    Examples:
-    (1) solver_options = {'jax_solver': {}}
-    (2) solver_options = {'umfpack_solver': {}}
-    (3) solver_options = {'petsc_solver': {'ksp_type': 'bcgsl', 'pc_type': 'jacobi'}, 'initial_guess': some_guess}
-
-    Default parameters will be used if no instruction is found:
-
-    solver_options = 
-    {
-        # If multiple solvers are specified or no solver is specified, 'jax_solver' will be used.
-        'jax_solver': 
-        {
-            # The JAX built-in linear solver 
-            # Reference: https://jax.readthedocs.io/en/latest/_autosummary/jax.scipy.sparse.linalg.bicgstab.html
-            'precond': True,
-        }
-
-        'umfpack_solver': 
-        {   
-            # The scipy solver that calls UMFPACK
-            # Reference: https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.spsolve.html
-        }
-
-        'petsc_solver':
-        {   
-            # PETSc solver
-            # For more ksp_type and pc_type: https://www.mcs.anl.gov/petsc/petsc4py-current/docs/apiref/index.html
-            'ksp_type': 'bcgsl', # e.g., 'minres', 'gmres', 'tfqmr'
-            'pc_type': 'ilu', # e.g., 'jacobi'
-        }
-
-        'line_search_flag': False, # Line search method
-        'initial_guess': initial_guess, # Same shape as sol_list
-        'tol': 1e-5, # Absolute tolerance for residual vector (l2 norm), used in Newton's method
-        'rel_tol': 1e-8, # Relative tolerance for residual vector (l2 norm), used in Newton's method
-    }
-
-    The solver imposes Dirichlet B.C. with "row elimination" method.
-
-    Some memo:
-
-    res(u) = D*r(u) + (I - D)u - u_b
-    D = [[1 0 0 0]
-         [0 1 0 0]
-         [0 0 0 0]
-         [0 0 0 1]]
-    I = [[1 0 0 0]
-         [0 1 0 0]
-         [0 0 1 0]
-         [0 0 0 1]
-    A = d(res)/d(u) = D*dr/du + (I - D)
-
-    The function newton_update computes r(u) and dr/du
+    Main nonlinear solver that implements Newton-Raphson iteration with multiple
+    linear solver backends. Enforces Dirichlet boundary conditions via row 
+    elimination method and supports advanced features like line search, 
+    prolongation matrices, and macro terms.
+    
+    Args:
+        problem (Problem): Finite element problem instance containing mesh,
+            finite elements, and boundary conditions.
+        solver_options (dict, optional): Solver configuration dictionary. Defaults to {}.
+            Supported keys:
+            - 'jax_solver': JAX iterative solver options
+                - 'precond' (bool): Enable Jacobi preconditioning. Defaults to True.
+            - 'umfpack_solver': SciPy UMFPACK direct solver options (empty dict)
+            - 'petsc_solver': PETSc iterative solver options
+                - 'ksp_type' (str): Krylov method ('bicgstab', 'gmres', 'tfqmr'). Defaults to 'bcgsl'.
+                - 'pc_type' (str): Preconditioner ('ilu', 'jacobi', 'hypre'). Defaults to 'ilu'.
+            - 'line_search_flag' (bool): Enable line search optimization. Defaults to False.
+            - 'initial_guess' (List[np.ndarray]): Initial solution guess. Same shape as output.
+            - 'tol' (float): Absolute tolerance for residual L2 norm. Defaults to 1e-6.
+            - 'rel_tol' (float): Relative tolerance for residual L2 norm. Defaults to 1e-8.
+            
+    Returns:
+        List[np.ndarray]: Solution list where each array corresponds to a variable.
+            For multi-variable problems, returns [u1, u2, ...] where each ui has
+            shape (num_nodes, vec_components).
+            
+    Raises:
+        AssertionError: If residual contains NaN values or solver fails to converge.
+        
+    Note:
+        Boundary Condition Enforcement:
+        Uses row elimination method where the residual becomes:
+        res(u) = D*r(u) + (I - D)*u - u_b
+        
+        Where:
+        - D: Diagonal matrix with zeros at constrained DOFs
+        - r(u): Physical residual from weak form
+        - u_b: Prescribed boundary values
+        
+        The Jacobian matrix is modified accordingly:
+        A = d(res)/d(u) = D*dr/du + (I - D)
+        
+        Solver Selection:
+        If no solver is specified, JAX solver is used by default.
+        Only one solver type should be specified per call.
+        
+    Example:
+        Basic nonlinear solve with JAX solver:
+        
+        >>> solver_options = {'jax_solver': {'precond': True}}
+        >>> solution = solver(problem, solver_options)
+        
+        PETSc solver with custom tolerances:
+        
+        >>> options = {
+        ...     'petsc_solver': {'ksp_type': 'gmres', 'pc_type': 'ilu'},
+        ...     'tol': 1e-8,
+        ...     'rel_tol': 1e-10
+        ... }
+        >>> solution = solver(problem, options)
+        
+        With initial guess and line search:
+        
+        >>> options = {
+        ...     'umfpack_solver': {},
+        ...     'initial_guess': initial_solution,
+        ...     'line_search_flag': True
+        ... }
+        >>> solution = solver(problem, options)
     """
     logger.debug(f"Calling the row elimination solver for imposing Dirichlet B.C.")
     logger.debug("Start timing")
     start = time.time()
 
-    if 'initial_guess' in solver_options:
+    if "initial_guess" in solver_options:
         # We dont't want inititual guess to play a role in the differentiation chain.
-        initial_guess = jax.lax.stop_gradient(solver_options['initial_guess'])
+        initial_guess = jax.lax.stop_gradient(solver_options["initial_guess"])
         dofs = jax.flatten_util.ravel_pytree(initial_guess)[0]
 
     else:
-        if hasattr(problem, 'prolongation_matrix'):
-            dofs = np.zeros(problem.prolongation_matrix.shape[1]) # reduced dofs
+        if problem.prolongation_matrix is not None:
+            dofs = np.zeros(problem.prolongation_matrix.shape[1])  # reduced dofs
         else:
             dofs = np.zeros(problem.num_total_dofs_all_vars)
 
-    rel_tol = solver_options['rel_tol'] if 'rel_tol' in solver_options else 1e-8
-    tol = solver_options['tol'] if 'tol' in solver_options else 1e-6
+    rel_tol = solver_options["rel_tol"] if "rel_tol" in solver_options else 1e-8
+    tol = solver_options["tol"] if "tol" in solver_options else 1e-6
 
     def newton_update_helper(dofs):
-        if hasattr(problem, 'prolongation_matrix'):
-            logger.debug(f"Using prolongation_matrix, shape = {problem.prolongation_matrix.shape}")
+        if problem.prolongation_matrix is not None:
+            logger.debug(
+                f"Using prolongation_matrix, shape = {problem.prolongation_matrix.shape}"
+            )
             dofs = problem.prolongation_matrix @ dofs
 
         sol_list = problem.unflatten_fn_sol_list(dofs)
@@ -420,13 +753,13 @@ def solver(problem, solver_options={}):
         res_vec = apply_bc_vec(res_vec, dofs, problem)
 
         problem.compute_csr(CHUNK_SIZE)  # Ensure CSR matrix is computed
-        
-        if hasattr(problem, 'prolongation_matrix'):
+
+        if problem.prolongation_matrix is not None:
             res_vec = problem.prolongation_matrix.T @ res_vec
 
         A, A_reduced = get_A(problem)
 
-        if hasattr(problem, 'macro_term') and problem.macro_term is not None:
+        if problem.macro_term is not None:
 
             macro_term_petsc = array_to_petsc_vec(problem.macro_term, A.getSize()[0])
             K_affine_vec = PETSc.Vec().createSeq(A.getSize()[0])
@@ -441,31 +774,31 @@ def solver(problem, solver_options={}):
     res_vec, A = newton_update_helper(dofs)
     res_val = np.linalg.norm(res_vec)
     res_val_initial = res_val
-    rel_res_val = res_val/res_val_initial
+    rel_res_val = res_val / res_val_initial
     logger.debug(f"Before, l_2 res = {res_val}, relative l_2 res = {rel_res_val}")
 
     while (rel_res_val > rel_tol) and (res_val > tol):
         dofs = linear_incremental_solver(problem, res_vec, A, dofs, solver_options)
         res_vec, A = newton_update_helper(dofs)
         res_val = np.linalg.norm(res_vec)
-        rel_res_val = res_val/res_val_initial
+        rel_res_val = res_val / res_val_initial
 
         logger.debug(f"l_2 res = {res_val}, relative l_2 res = {rel_res_val}")
 
     assert np.all(np.isfinite(res_val)), f"res_val contains NaN, stop the program!"
     assert np.all(np.isfinite(dofs)), f"dofs contains NaN, stop the program!"
 
-    if hasattr(problem, 'prolongation_matrix'):
+    if problem.prolongation_matrix is not None:
         dofs = problem.prolongation_matrix @ dofs
-    
-    if hasattr(problem, 'macro_term') and problem.macro_term is not None:
+
+    if problem.macro_term is not None:
         dofs = dofs + problem.macro_term
 
-    # If sol_list = [[[u1x, u1y], 
-    #                 [u2x, u2y], 
-    #                 [u3x, u3y], 
-    #                 [u4x, u4y]], 
-    #                [[p1], 
+    # If sol_list = [[[u1x, u1y],
+    #                 [u2x, u2y],
+    #                 [u3x, u3y],
+    #                 [u4x, u4y]],
+    #                [[p1],
     #                 [p2]]],
     # the flattend DOF vector will be [u1x, u1y, u2x, u2y, u3x, u3y, u4x, u4y, p1, p2]
     sol_list = problem.unflatten_fn_sol_list(dofs)
@@ -479,372 +812,35 @@ def solver(problem, solver_options={}):
     return sol_list
 
 
-################################################################################
-# The "arc length" solver
-# Reference: Vasios, Nikolaos. "Nonlinear analysis of structures." The Arc-Length method. Harvard (2015).
-# Our implementation follows the Crisfeld's formulation
-
-# TODO: Do we want to merge displacement-control and force-control codes?
-
-def arc_length_solver_disp_driven(problem, prev_u_vec, prev_lamda, prev_Delta_u_vec, prev_Delta_lamda, Delta_l=0.1, psi=1.):
-    """
-    TODO: Does not support periodic B.C., need some work here.
-    """
-    def newton_update_helper(dofs):
-        sol_list = problem.unflatten_fn_sol_list(dofs)
-        res_list = problem.newton_update(sol_list)
-        res_vec = jax.flatten_util.ravel_pytree(res_list)[0]
-        res_vec = apply_bc_vec(res_vec, dofs, problem, lamda)
-        A = get_A(problem)
-        return res_vec, A
-
-    def u_lamda_dot_product(Delta_u_vec1, Delta_lamda1, Delta_u_vec2, Delta_lamda2):
-        return np.sum(Delta_u_vec1*Delta_u_vec2) + psi**2.*Delta_lamda1*Delta_lamda2*np.sum(u_b**2.)
- 
-    u_vec = prev_u_vec
-    lamda = prev_lamda
-
-    u_b = assign_bc(np.zeros_like(prev_u_vec), problem)
-
-    Delta_u_vec_dir = prev_Delta_u_vec
-    Delta_lamda_dir = prev_Delta_lamda
-
-    tol = 1e-6
-    res_val = 1.
-    while res_val > tol:
-
-        res_vec, A = newton_update_helper(u_vec)
-        res_val = np.linalg.norm(res_vec)
-        logger.debug(f"Arc length solver: res_val = {res_val}")
-  
-        delta_u_bar = umfpack_solve(A, -res_vec)
-        delta_u_t = umfpack_solve(A, u_b)
-
-        Delta_u_vec = u_vec - prev_u_vec
-        Delta_lamda = lamda - prev_lamda
-        a1 = np.sum(delta_u_t**2.) + psi**2.*np.sum(u_b**2.)
-        a2 = 2.* np.sum((Delta_u_vec + delta_u_bar)*delta_u_t) + 2.*psi**2.*Delta_lamda*np.sum(u_b**2.)
-        a3 = np.sum((Delta_u_vec + delta_u_bar)**2.) + psi**2.*Delta_lamda**2.*np.sum(u_b**2.) - Delta_l**2.
-
-        delta_lamda1 = (-a2 + np.sqrt(a2**2. - 4.*a1*a3))/(2.*a1)
-        delta_lamda2 = (-a2 - np.sqrt(a2**2. - 4.*a1*a3))/(2.*a1)
-
-        logger.debug(f"Arc length solver: delta_lamda1 = {delta_lamda1}, delta_lamda2 = {delta_lamda2}")
-        assert np.isfinite(delta_lamda1) and np.isfinite(delta_lamda2), f"No valid solutions for delta lambda, a1 = {a1}, a2 = {a2}, a3 = {a3}"
-
-        delta_u_vec1 = delta_u_bar + delta_lamda1 * delta_u_t
-        delta_u_vec2 = delta_u_bar + delta_lamda2 * delta_u_t
-
-        Delta_u_vec_dir1 = u_vec + delta_u_vec1 - prev_u_vec
-        Delta_lamda_dir1 = lamda + delta_lamda1 - prev_lamda
-        dot_prod1 = u_lamda_dot_product(Delta_u_vec_dir, Delta_lamda_dir, Delta_u_vec_dir1, Delta_lamda_dir1)
-
-        Delta_u_vec_dir2 = u_vec + delta_u_vec2 - prev_u_vec
-        Delta_lamda_dir2 = lamda + delta_lamda2 - prev_lamda
-        dot_prod2 = u_lamda_dot_product(Delta_u_vec_dir, Delta_lamda_dir, Delta_u_vec_dir2, Delta_lamda_dir2)
-
-        if np.abs(dot_prod1) < 1e-10 and np.abs(dot_prod2) < 1e-10:
-            # At initial step, (Delta_u_vec_dir, Delta_lamda_dir) is zero, so both dot_prod1 and dot_prod2 are zero.
-            # We simply select the larger value for delta_lamda.
-            delta_lamda = np.maximum(delta_lamda1, delta_lamda2)
-        elif dot_prod1 > dot_prod2:
-            delta_lamda = delta_lamda1
-        else:
-            delta_lamda = delta_lamda2
-
-        lamda = lamda + delta_lamda
-        delta_u = delta_u_bar + delta_lamda * delta_u_t
-        u_vec = u_vec + delta_u
-
-        Delta_u_vec_dir = u_vec - prev_u_vec
-        Delta_lamda_dir = lamda - prev_lamda
-
-    logger.debug(f"Arc length solver: finished for one step, with Delta lambda = {lamda - prev_lamda}")
- 
-    return u_vec, lamda, Delta_u_vec_dir, Delta_lamda_dir
-
-
-def arc_length_solver_force_driven(problem, prev_u_vec, prev_lamda, prev_Delta_u_vec, prev_Delta_lamda, q_vec, Delta_l=0.1, psi=1.):
-    """
-    TODO: Does not support periodic B.C., need some work here.
-    """
-    def newton_update_helper(dofs):
-        sol_list = problem.unflatten_fn_sol_list(dofs)
-        res_list = problem.newton_update(sol_list)
-        res_vec = jax.flatten_util.ravel_pytree(res_list)[0]
-        res_vec = apply_bc_vec(res_vec, dofs, problem)
-        A = get_A(problem)
-        return res_vec, A
-
-    def u_lamda_dot_product(Delta_u_vec1, Delta_lamda1, Delta_u_vec2, Delta_lamda2):
-        return np.sum(Delta_u_vec1*Delta_u_vec2) + psi**2.*Delta_lamda1*Delta_lamda2*np.sum(q_vec_mapped**2.)
- 
-    u_vec = prev_u_vec
-    lamda = prev_lamda
-    q_vec_mapped = assign_zeros_bc(q_vec, problem)
-
-    Delta_u_vec_dir = prev_Delta_u_vec
-    Delta_lamda_dir = prev_Delta_lamda
-
-    tol = 1e-6
-    res_val = 1.
-    while res_val > tol:
-        res_vec, A = newton_update_helper(u_vec)
-        res_val = np.linalg.norm(res_vec + lamda*q_vec_mapped)
-        logger.debug(f"Arc length solver: res_val = {res_val}")
-
-        # TODO: the scipy umfpack solver seems to be far better than the jax linear solver, so we use umfpack solver here.
-        # x0_1 = assign_bc(np.zeros_like(u_vec), problem)
-        # x0_2 = copy_bc(u_vec, problem)
-        # delta_u_bar = jax_solve(problem, A, -(res_vec + lamda*q_vec_mapped), x0=x0_1 - x0_2, precond=True)   
-        # delta_u_t = jax_solve(problem, A, -q_vec_mapped, x0=np.zeros_like(u_vec), precond=True)   
-
-        delta_u_bar = umfpack_solve(A, -(res_vec + lamda*q_vec_mapped))
-        delta_u_t = umfpack_solve(A, -q_vec_mapped)
-
-        Delta_u_vec = u_vec - prev_u_vec
-        Delta_lamda = lamda - prev_lamda
-        a1 = np.sum(delta_u_t**2.) + psi**2.*np.sum(q_vec_mapped**2.)
-        a2 = 2.* np.sum((Delta_u_vec + delta_u_bar)*delta_u_t) + 2.*psi**2.*Delta_lamda*np.sum(q_vec_mapped**2.)
-        a3 = np.sum((Delta_u_vec + delta_u_bar)**2.) + psi**2.*Delta_lamda**2.*np.sum(q_vec_mapped**2.) - Delta_l**2.
-
-        delta_lamda1 = (-a2 + np.sqrt(a2**2. - 4.*a1*a3))/(2.*a1)
-        delta_lamda2 = (-a2 - np.sqrt(a2**2. - 4.*a1*a3))/(2.*a1)
-
-        logger.debug(f"Arc length solver: delta_lamda1 = {delta_lamda1}, delta_lamda2 = {delta_lamda2}")
-        assert np.isfinite(delta_lamda1) and np.isfinite(delta_lamda2), f"No valid solutions for delta lambda, a1 = {a1}, a2 = {a2}, a3 = {a3}"
-
-        delta_u_vec1 = delta_u_bar + delta_lamda1 * delta_u_t
-        delta_u_vec2 = delta_u_bar + delta_lamda2 * delta_u_t
-
-        Delta_u_vec_dir1 = u_vec + delta_u_vec1 - prev_u_vec
-        Delta_lamda_dir1 = lamda + delta_lamda1 - prev_lamda
-        dot_prod1 = u_lamda_dot_product(Delta_u_vec_dir, Delta_lamda_dir, Delta_u_vec_dir1, Delta_lamda_dir1)
-
-        Delta_u_vec_dir2 = u_vec + delta_u_vec2 - prev_u_vec
-        Delta_lamda_dir2 = lamda + delta_lamda2 - prev_lamda
-        dot_prod2 = u_lamda_dot_product(Delta_u_vec_dir, Delta_lamda_dir, Delta_u_vec_dir2, Delta_lamda_dir2)
-
-        if np.abs(dot_prod1) < 1e-10 and np.abs(dot_prod2) < 1e-10:
-            # At initial step, (Delta_u_vec_dir, Delta_lamda_dir) is zero, so both dot_prod1 and dot_prod2 are zero.
-            # We simply select the larger value for delta_lamda.
-            delta_lamda = np.maximum(delta_lamda1, delta_lamda2)
-        elif dot_prod1 > dot_prod2:
-            delta_lamda = delta_lamda1
-        else:
-            delta_lamda = delta_lamda2
-
-        lamda = lamda + delta_lamda
-        delta_u = delta_u_bar + delta_lamda * delta_u_t
-        u_vec = u_vec + delta_u
-
-        Delta_u_vec_dir = u_vec - prev_u_vec
-        Delta_lamda_dir = lamda - prev_lamda
-
-    logger.debug(f"Arc length solver: finished for one step, with Delta lambda = {lamda - prev_lamda}")
- 
-    return u_vec, lamda, Delta_u_vec_dir, Delta_lamda_dir
-
-
-def get_q_vec(problem):
-    """
-    Used in the arc length method only, to get the external force vector q_vec
-    """
-    dofs = np.zeros(problem.num_total_dofs_all_vars)
-    sol_list = problem.unflatten_fn_sol_list(dofs)
-    res_list = problem.newton_update(sol_list)
-    q_vec = jax.flatten_util.ravel_pytree(res_list)[0]
-    return q_vec
-
-
-################################################################################
-# Dynamic relaxation solver
-
-def assembleCSR(problem, dofs):
-    sol_list = problem.unflatten_fn_sol_list(dofs)
-    problem.newton_update(sol_list)
-    A_sp_scipy = scipy.sparse.csr_array((problem.V, (problem.I, problem.J)),
-        shape=(problem.fes[0].num_total_dofs, problem.fes[0].num_total_dofs))
-
-    for ind, fe in enumerate(problem.fes):
-        for i in range(len(fe.node_inds_list)):
-            row_inds = onp.array(fe.node_inds_list[i] * fe.vec + fe.vec_inds_list[i] + problem.offset[ind], dtype=onp.int32)
-            for row_ind in row_inds:
-                A_sp_scipy.data[A_sp_scipy.indptr[row_ind]: A_sp_scipy.indptr[row_ind + 1]] = 0.
-                A_sp_scipy[row_ind, row_ind] = 1.
-
-    return A_sp_scipy
-
-
-def calC(t, cmin, cmax):
-
-    if t < 0.: t = 0.
-
-    c = 2. * onp.sqrt(t)
-    if (c < cmin): c = cmin
-    if (c > cmax): c = cmax
-
-    return c
-
-
-def printInfo(error, t, c, tol, eps, qdot, qdotdot, nIters, nPrint, info, info_force):
-
-    ## printing control
-    if nIters % nPrint == 1:
-        #logger.info('\t------------------------------------')
-        if info_force == True:
-            print(('\nDR Iteration %d: Max force (residual error) = %g (tol = %g)' +
-                   'Max velocity = %g') % (nIters, error, tol,
-                                            np.max(np.absolute(qdot))))
-        if info == True:
-            print('\nDamping t: ',t, );
-            print('Damping coefficient: ', c)
-            print('Max epsilon: ',np.max(eps))
-            print('Max acceleration: ',np.max(np.absolute(qdotdot)))
-
-
-def dynamic_relax_solve(problem, tol=1e-6, nKMat=50, nPrint=500, info=True, info_force=True, initial_guess=None):
-    """
-    Implementation of
-
-    Luet, David Joseph. Bounding volume hierarchy and non-uniform rational B-splines for contact enforcement
-    in large deformation finite element analysis of sheet metal forming. Diss. Princeton University, 2016.
-    Chapter 4.3 Nonlinear System Solution
-
-    Particularly good for handling buckling behavior.
-    There is a FEniCS version of this dynamic relaxation algorithm.
-    The code below is a direct translation from the FEniCS version.
-
- 
-    TODO: Does not support periodic B.C., need some work here.
-    """
-    solver_options = {'umfpack_solver': {}}
-
-    # TODO: consider these in initial guess
-    def newton_update_helper(dofs):
-        sol_list = problem.unflatten_fn_sol_list(dofs)
-        res_list = problem.newton_update(sol_list)
-        res_vec = jax.flatten_util.ravel_pytree(res_list)[0]
-        res_vec = apply_bc_vec(res_vec, dofs, problem)
-        A = get_A(problem)
-        return res_vec, A
- 
-    dofs = np.zeros(problem.num_total_dofs_all_vars)
-    res_vec, A = newton_update_helper(dofs)
-    dofs = linear_incremental_solver(problem, res_vec, A, dofs, solver_options)
-
-    if initial_guess is not None:
-        dofs = initial_guess
-        dofs = assign_bc(dofs, problem)
-
-    # parameters not to change
-    cmin = 1e-3
-    cmax = 3.9
-    h_tilde = 1.1
-    h = 1.
-
-    # initialize all arrays
-    N = len(dofs)  #print("--------num of DOF's: %d-----------" % N)
-    #initialize displacements, velocities and accelerations
-    q, qdot, qdotdot = onp.zeros(N), onp.zeros(N), onp.zeros(N)
-    #initialize displacements, velocities and accelerations from a previous time step
-    q_old, qdot_old, qdotdot_old = onp.zeros(N), onp.zeros(N), onp.zeros(N)
-    #initialize the M, eps, R_old arrays
-    eps, M, R, R_old = onp.zeros(N), onp.zeros(N), onp.zeros(N), onp.zeros(N)
-
-    @jax.jit
-    def assembleVec(dofs):
-        res_fn = get_flatten_fn(problem.compute_residual, problem)
-        res_vec = res_fn(dofs)
-        res_vec = assign_zeros_bc(res_vec, problem)
-        return res_vec
-
-    R = onp.array(assembleVec(dofs))
-    KCSR = assembleCSR(problem, dofs)
-
-    M[:] = h_tilde * h_tilde / 4. * onp.array(
-        onp.absolute(KCSR).sum(axis=1)).squeeze()
-    q[:] = dofs
-    qdot[:] = -h / 2. * R / M
-    # set the counters for iterations and
-    nIters, iKMat = 0, 0
-    error = 1.0
-    timeZ = time.time() #Measurement of loop time.
-
-    assert onp.all(onp.isfinite(M)), f"M not finite"
-    assert onp.all(onp.isfinite(q)), f"q not finite"
-    assert onp.all(onp.isfinite(qdot)), f"qdot not finite"
-
-    error = onp.max(onp.absolute(R))
-
-    while error > tol:
-
-        print(f"error = {error}")
-        # marching forward
-        q_old[:] = q[:]; R_old[:] = R[:]
-        q[:] += h*qdot; dofs = np.array(q)
-
-        R = onp.array(assembleVec(dofs))
-
-        nIters += 1
-        iKMat += 1
-        error = onp.max(onp.absolute(R))
-
-        # damping calculation
-        S0 = onp.dot((R - R_old) / h, qdot)
-        t = S0 / onp.einsum('i,i,i', qdot, M, qdot)
-        c = calC(t, cmin, cmax)
-
-        # determine whether to recal KMat
-        eps = h_tilde * h_tilde / 4. * onp.absolute(
-            onp.divide((qdotdot - qdotdot_old), (q - q_old),
-                       out=onp.zeros_like((qdotdot - qdotdot_old)),
-                       where=(q - q_old) != 0))
-
-        # calculating the jacobian matrix
-        if ((onp.max(eps) > 1) and (iKMat > nKMat)): #SPR JAN max --> min
-            if info == True:
-                print('\nRecalculating the tangent matrix: ', nIters)
-
-            iKMat = 0
-            KCSR = assembleCSR(problem, dofs)
-            M[:] = h_tilde * h_tilde / 4. * onp.array(
-                onp.absolute(KCSR).sum(axis=1)).squeeze()
-
-        # compute new velocities and accelerations
-        qdot_old[:] = qdot[:]; qdotdot_old[:] = qdotdot[:];
-        qdot = (2.- c*h)/(2 + c*h) * qdot_old - 2.*h/(2.+c*h)* R / M
-        qdot_old[:] = qdot[:]
-        qdotdot = qdot - qdot_old
-
-        # output on screen
-        printInfo(error, t, c, tol, eps, qdot, qdotdot, nIters, nPrint, info, info_force)
-
-    # check if converged
-    convergence = True
-    if onp.isnan(onp.max(onp.absolute(R))):
-        convergence = False
-
-    # print final info
-    if convergence:
-        print("DRSolve finished in %d iterations and %fs" % \
-              (nIters, time.time() - timeZ))
-    else:
-        print("FAILED to converged")
-
-    sol_list = problem.unflatten_fn_sol_list(dofs)
-
-    return sol_list[0]
-
-
-################################################################################
-# Implicit differentiation with the adjoint method
-
 def implicit_vjp(problem, sol_list, params, v_list, adjoint_solver_options):
+    """Compute vector-Jacobian product using the adjoint method.
+    
+    Implements the adjoint method to efficiently compute gradients of functionals
+    with respect to problem parameters. This is essential for optimization,
+    parameter identification, and sensitivity analysis.
+    
+    Args:
+        problem (Problem): Finite element problem instance.
+        sol_list (List[np.ndarray]): Solution state at which to evaluate gradients.
+        params: Problem parameters with respect to which gradients are computed.
+        v_list (List[np.ndarray]): Vector for the vector-Jacobian product.
+        adjoint_solver_options (dict): Linear solver options for adjoint system.
+        
+    Returns:
+        Gradients with respect to problem parameters.
+        
+    Note:
+        The method solves the adjoint system A^T λ = v where A is the Jacobian
+        at the solution state, then computes the parameter sensitivities using
+        the chain rule: dF/dp = -λ^T (∂c/∂p) where c is the constraint (residual).
+        
+    Example:
+        >>> adjoint_options = {'jax_solver': {'precond': True}}
+        >>> gradients = implicit_vjp(problem, solution, params, v_list, adjoint_options)
+    """
 
     def constraint_fn(dofs, params):
-        """c(u, p)
-        """
+        """c(u, p)"""
         problem.set_params(params)
         res_fn = problem.compute_residual
         res_fn = get_flatten_fn(res_fn, problem)
@@ -857,21 +853,22 @@ def implicit_vjp(problem, sol_list, params, v_list, adjoint_solver_options):
         return problem.unflatten_fn_sol_list(con_vec)
 
     def get_partial_params_c_fn(sol_list):
-        """c(u=u, p)
-        """
+        """c(u=u, p)"""
+
         def partial_params_c_fn(params):
             return constraint_fn_sol_to_sol(sol_list, params)
 
         return partial_params_c_fn
 
     def get_vjp_contraint_fn_params(params, sol_list):
-        """v*(partial dc/dp)
-        """
+        """v*(partial dc/dp)"""
         partial_c_fn = get_partial_params_c_fn(sol_list)
+
         def vjp_linear_fn(v_list):
             primals_output, f_vjp = jax.vjp(partial_c_fn, params)
-            val, = f_vjp(v_list)
+            (val,) = f_vjp(v_list)
             return val
+
         return vjp_linear_fn
 
     problem.set_params(params)
@@ -880,13 +877,15 @@ def implicit_vjp(problem, sol_list, params, v_list, adjoint_solver_options):
     A, A_reduced = get_A(problem)
     v_vec = jax.flatten_util.ravel_pytree(v_list)[0]
 
-    if hasattr(problem, 'prolongation_matrix'):
+    if problem.prolongation_matrix is not None:
         v_vec = problem.prolongation_matrix.T @ v_vec
 
     # Be careful that A.transpose() does in-place change to A
-    adjoint_vec = linear_solver(A_reduced.transpose(), v_vec, None, adjoint_solver_options)
+    adjoint_vec = linear_solver(
+        A_reduced.transpose(), v_vec, None, adjoint_solver_options
+    )
 
-    if hasattr(problem, 'prolongation_matrix'):
+    if problem.prolongation_matrix is not None:
         adjoint_vec = problem.prolongation_matrix @ adjoint_vec
 
     vjp_linear_fn = get_vjp_contraint_fn_params(params, sol_list)
@@ -897,6 +896,37 @@ def implicit_vjp(problem, sol_list, params, v_list, adjoint_solver_options):
 
 
 def ad_wrapper(problem, solver_options={}, adjoint_solver_options={}):
+    """Create automatic differentiation wrapper for the solver.
+    
+    Wraps the nonlinear solver with JAX's custom VJP (vector-Jacobian product)
+    to enable automatic differentiation through the solution process. This allows
+    the solver to be used in optimization loops and gradient-based algorithms.
+    
+    Args:
+        problem (Problem): Finite element problem template.
+        solver_options (dict, optional): Options for forward solver. Defaults to {}.
+        adjoint_solver_options (dict, optional): Options for adjoint solver. Defaults to {}.
+        
+    Returns:
+        Callable: JAX-differentiable function that takes parameters and returns solution.
+        
+    Example:
+        Setup for parameter optimization:
+        
+        >>> differentiable_solver = ad_wrapper(problem)
+        >>> 
+        >>> def objective(params):
+        ...     solution = differentiable_solver(params)
+        ...     return compute_objective(solution)
+        >>> 
+        >>> grad_fn = jax.grad(objective)
+        >>> gradients = grad_fn(initial_params)
+        
+    Note:
+        The wrapper uses implicit differentiation via the adjoint method to
+        compute gradients efficiently, avoiding the need to differentiate
+        through the entire Newton iteration process.
+    """
     @jax.custom_vjp
     def fwd_pred(params):
         problem.set_params(params)
@@ -911,6 +941,7 @@ def ad_wrapper(problem, solver_options={}, adjoint_solver_options={}):
         logger.info("Running backward and solving the adjoint problem...")
         params, sol_list = res
         vjp_result = implicit_vjp(problem, sol_list, params, v, adjoint_solver_options)
-        return (vjp_result, )
+        return (vjp_result,)
+
     fwd_pred.defvjp(f_fwd, f_bwd)
     return fwd_pred
