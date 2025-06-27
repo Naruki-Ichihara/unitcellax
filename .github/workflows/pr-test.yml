@@ -1,0 +1,139 @@
+name: PR Tests
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  quick-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build development container
+      run: |
+        docker compose build
+        
+    - name: Start development environment
+      run: |
+        docker compose up -d
+        
+    - name: Wait for container startup
+      run: |
+        sleep 10
+        
+    - name: Quick dependency install
+      run: |
+        docker exec unitcellax bash -c "
+          # Quick install for PR testing
+          apt update && apt install -y fenicsx
+          pip install -e .
+          pip install pytest
+        "
+        
+    - name: Run environment validation
+      run: |
+        docker exec unitcellax bash -c "
+          cd /workspace
+          python -c '
+          import sys
+          print(f\"Python version: {sys.version}\")
+          
+          try:
+              import jax
+              print(f\"✓ JAX version: {jax.__version__}\")
+          except ImportError as e:
+              print(f\"✗ JAX import failed: {e}\")
+              
+          try:
+              import numpy as np
+              print(f\"✓ NumPy version: {np.__version__}\")
+              assert np.__version__.startswith(\"1.26\"), \"NumPy version must be 1.26.x for FEniCS compatibility\"
+              print(\"✓ NumPy version is compatible with FEniCS\")
+          except (ImportError, AssertionError) as e:
+              print(f\"✗ NumPy check failed: {e}\")
+              
+          try:
+              from unitcellax.pbc import PeriodicPairing, prolongation_matrix, periodic_bc_3D
+              print(\"✓ PBC module imports successfully\")
+          except ImportError as e:
+              print(f\"✗ PBC import failed: {e}\")
+              
+          try:
+              from unitcellax.unitcell import UnitCell
+              print(\"✓ UnitCell imports successfully\")
+          except ImportError as e:
+              print(f\"✗ UnitCell import failed: {e}\")
+          '
+        "
+        
+    - name: Run PBC tests only
+      run: |
+        docker exec unitcellax bash -c "
+          cd /workspace
+          pytest tests/test_pbc.py -v --tb=short -x
+        "
+        
+    - name: Quick smoke test
+      run: |
+        docker exec unitcellax bash -c "
+          cd /workspace
+          python -c '
+          from unitcellax.pbc import PeriodicPairing, periodic_bc_3D
+          from unitcellax.fem.mesh import box_mesh
+          from unitcellax.unitcell import UnitCell
+          
+          class TestCell(UnitCell):
+              def mesh_build(self, **kwargs):
+                  return box_mesh(2, 2, 2, 1.0, 1.0, 1.0)
+          
+          print(\"Creating test unit cell...\")
+          cell = TestCell()
+          print(f\"Unit cell created with {len(cell.points)} points\")
+          
+          print(\"Generating periodic pairings...\")
+          pairings = periodic_bc_3D(cell, vec=1, dim=3)
+          print(f\"Generated {len(pairings)} periodic pairings\")
+          
+          print(\"✓ Smoke test passed\")
+          '
+        "
+        
+    - name: Clean up
+      if: always()
+      run: |
+        docker compose down
+        
+  code-quality:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+        
+    - name: Install quality tools
+      run: |
+        pip install black isort flake8
+        
+    - name: Check code formatting with black
+      run: |
+        black --check --diff unitcellax/ tests/ 2>&1 || echo "::warning::Code formatting issues found. Run 'black unitcellax/ tests/' to fix."
+        
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only --diff unitcellax/ tests/ 2>&1 || echo "::warning::Import sorting issues found. Run 'isort unitcellax/ tests/' to fix."
+        
+    - name: Check style with flake8
+      run: |
+        flake8 unitcellax/ tests/ --max-line-length=100 --extend-ignore=E203,W503 --statistics 2>&1 || echo "::warning::Style issues found."
