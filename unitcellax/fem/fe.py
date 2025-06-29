@@ -1,7 +1,7 @@
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Tuple
 
 import jax
 import jax.numpy as np
@@ -50,7 +50,7 @@ class FiniteElement:
         List[Union[List[Callable], List[Callable], List[Callable], List[int]]]
     ] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.points = self.mesh.points
         self.cells = self.mesh.cells
         self.num_cells = len(self.cells)
@@ -74,7 +74,6 @@ class FiniteElement:
         self.num_nodes = self.shape_vals.shape[1]
         self.num_faces = self.face_shape_vals.shape[0]
         self.shape_grads, self.JxW = self.get_shape_grads()
-        print(self.dirichlet_bc_info)
         self.node_inds_list, self.vec_inds_list, self.vals_list = (
             self.Dirichlet_boundary_conditions(self.dirichlet_bc_info)
         )
@@ -98,7 +97,7 @@ class FiniteElement:
             f"Element type is {self.ele_type}, using {self.num_quads} quad points per element."
         )
 
-    def get_shape_grads(self):
+    def get_shape_grads(self) -> Tuple[onp.ndarray, onp.ndarray]:
         """Compute shape function gradient value.
 
         The gradient is w.r.t physical coordinates.
@@ -135,7 +134,7 @@ class FiniteElement:
         JxW = jacobian_det * self.quad_weights[None, :]
         return shape_grads_physical, JxW
 
-    def get_face_shape_grads(self, boundary_inds):
+    def get_face_shape_grads(self, boundary_inds: List[onp.ndarray]) -> Tuple[onp.ndarray, onp.ndarray]:
         """Face shape function gradients and JxW (for surface integral).
 
         Nanson's formula is used to map physical surface integral to reference domain.
@@ -197,7 +196,7 @@ class FiniteElement:
         nanson_scale = nanson_scale * jacobian_det * selected_weights
         return face_shape_grads_physical, nanson_scale
 
-    def get_physical_quad_points(self):
+    def get_physical_quad_points(self) -> onp.ndarray:
         """Compute physical quadrature points.
 
         Returns:
@@ -210,7 +209,7 @@ class FiniteElement:
         )
         return physical_quad_points
 
-    def get_physical_surface_quad_points(self, boundary_inds):
+    def get_physical_surface_quad_points(self, boundary_inds: List[onp.ndarray]) -> onp.ndarray:
         """Compute physical quadrature points on the surface.
 
         Args:
@@ -234,7 +233,7 @@ class FiniteElement:
         )
         return physical_surface_quad_points
 
-    def Dirichlet_boundary_conditions(self, dirichlet_bc_info):
+    def Dirichlet_boundary_conditions(self, dirichlet_bc_info: Optional[List[Union[List[Callable], List[int], List[Callable]]]]) -> Tuple[List[onp.ndarray], List[onp.ndarray], List[onp.ndarray]]:
         """Indices and values for Dirichlet boundary conditions.
 
         Args:
@@ -278,7 +277,7 @@ class FiniteElement:
                 vals_list.append(values)
         return node_inds_list, vec_inds_list, vals_list
 
-    def update_Dirichlet_boundary_conditions(self, dirichlet_bc_info):
+    def update_Dirichlet_boundary_conditions(self, dirichlet_bc_info: Optional[List[Union[List[Callable], List[int], List[Callable]]]]) -> None:
         """Reset Dirichlet boundary conditions.
 
         Useful when a time-dependent problem is solved, and at each iteration the boundary
@@ -292,7 +291,7 @@ class FiniteElement:
             self.Dirichlet_boundary_conditions(dirichlet_bc_info)
         )
 
-    def get_boundary_conditions_inds(self, location_fns):
+    def get_boundary_conditions_inds(self, location_fns: Optional[List[Callable]]) -> List[onp.ndarray]:
         """Given location functions, compute which faces satisfy the condition.
 
         Args:
@@ -346,7 +345,7 @@ class FiniteElement:
 
         return boundary_inds_list
 
-    def convert_from_dof_to_quad(self, sol):
+    def convert_from_dof_to_quad(self, sol: np.ndarray) -> np.ndarray:
         """Obtain quad values from nodal solution.
 
         Args:
@@ -361,7 +360,7 @@ class FiniteElement:
         u = np.sum(cells_sol[:, None, :, :] * self.shape_vals[None, :, :, None], axis=2)
         return u
 
-    def convert_from_dof_to_face_quad(self, sol, boundary_inds):
+    def convert_from_dof_to_face_quad(self, sol: np.ndarray, boundary_inds: onp.ndarray) -> np.ndarray:
         """Obtain surface solution from nodal solution.
 
         Args:
@@ -386,7 +385,7 @@ class FiniteElement:
         )
         return u
 
-    def sol_to_grad(self, sol):
+    def sol_to_grad(self, sol: np.ndarray) -> np.ndarray:
         """Obtain solution gradient from nodal solution.
 
         Args:
@@ -403,7 +402,7 @@ class FiniteElement:
         u_grads = np.sum(u_grads, axis=2)  # (num_cells, num_quads, vec, dim)
         return u_grads
 
-    def print_BC_info(self):
+    def print_BC_info(self) -> None:
         """Print boundary condition information for debugging purposes.
 
         Todo:

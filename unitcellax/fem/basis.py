@@ -7,11 +7,12 @@ and triangular elements.
 """
 import basix
 import numpy as onp
+from typing import Tuple, Optional, List
 
 from unitcellax.fem import logger
 
 
-def get_elements(ele_type):
+def get_elements(ele_type: str) -> Tuple[basix.ElementFamily, basix.CellType, basix.CellType, Tuple[int, int, List[int]]]:
     """Get element configuration for specified element type.
     
     Returns the element family, cell types, and ordering parameters
@@ -103,7 +104,7 @@ def get_elements(ele_type):
     return element_family, basix_ele, basix_face_ele, orders
 
 
-def reorder_inds(inds, re_order):
+def reorder_inds(inds: onp.ndarray, re_order: List[int]) -> onp.ndarray:
     """Reorder node indices according to element-specific ordering.
     
     Converts indices from one ordering convention to another using
@@ -129,7 +130,7 @@ def reorder_inds(inds, re_order):
     return new_inds
 
 
-def get_shape_vals_and_grads(ele_type, gauss_order=None):
+def get_shape_vals_and_grads(ele_type: str, gauss_order: Optional[int] = None) -> Tuple[onp.ndarray, onp.ndarray, onp.ndarray]:
     """Compute shape function values and gradients at quadrature points.
     
     Calculates the shape function values and their gradients in the
@@ -169,7 +170,7 @@ def get_shape_vals_and_grads(ele_type, gauss_order=None):
     return shape_values, shape_grads_ref, weights
 
 
-def get_face_shape_vals_and_grads(ele_type, gauss_order=None):
+def get_face_shape_vals_and_grads(ele_type: str, gauss_order: Optional[int] = None) -> Tuple[onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray]:
     """Compute shape function values and gradients at face quadrature points.
     
     Calculates shape function values and gradients evaluated at quadrature

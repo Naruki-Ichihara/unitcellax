@@ -48,6 +48,7 @@ import numpy as onp
 from jax.experimental.sparse import BCOO
 import scipy
 import time
+from typing import Dict, List, Optional, Callable, Union, Tuple, Any
 from petsc4py import PETSc
 import gc
 
@@ -59,7 +60,7 @@ config.update("jax_enable_x64", True)
 CHUNK_SIZE = 100000000
 
 
-def array_to_petsc_vec(arr, size=None):
+def array_to_petsc_vec(arr: Union[np.ndarray, onp.ndarray], size: Optional[int] = None) -> PETSc.Vec:
     """Convert a JAX or NumPy array to a PETSc.Vec.
 
     Args:
@@ -78,7 +79,7 @@ def array_to_petsc_vec(arr, size=None):
     return vec
 
 
-def jax_solve(A, b, x0, precond):
+def jax_solve(A: PETSc.Mat, b: np.ndarray, x0: np.ndarray, precond: bool) -> np.ndarray:
     """Solves the equilibrium equation using a JAX solver.
 
     Args:
@@ -111,7 +112,7 @@ def jax_solve(A, b, x0, precond):
     return x
 
 
-def umfpack_solve(A, b):
+def umfpack_solve(A: PETSc.Mat, b: np.ndarray) -> np.ndarray:
     """Solve linear system using SciPy's UMFPACK interface.
     
     Solves the linear system Ax = b using the UMFPACK sparse direct solver
@@ -143,7 +144,7 @@ def umfpack_solve(A, b):
     return x
 
 
-def petsc_solve(A, b, ksp_type, pc_type):
+def petsc_solve(A: PETSc.Mat, b: np.ndarray, ksp_type: str, pc_type: str) -> np.ndarray:
     """Solve linear system using PETSc iterative solvers.
     
     Solves the linear system Ax = b using PETSc's iterative Krylov subspace
@@ -202,7 +203,7 @@ def petsc_solve(A, b, ksp_type, pc_type):
     return x.getArray()
 
 
-def linear_solver(A, b, x0, solver_options):
+def linear_solver(A: PETSc.Mat, b: np.ndarray, x0: np.ndarray, solver_options: Dict[str, Any]) -> np.ndarray:
     """Unified interface for multiple linear solver backends.
     
     Provides a consistent interface to JAX, UMFPACK, PETSc, and custom linear
@@ -277,7 +278,7 @@ def linear_solver(A, b, x0, solver_options):
 # "row elimination" solver
 
 
-def apply_bc_vec(res_vec, dofs, problem, scale=1.0):
+def apply_bc_vec(res_vec: np.ndarray, dofs: np.ndarray, problem: Any, scale: float = 1.0) -> np.ndarray:
     """Apply Dirichlet boundary conditions to residual vector.
     
     Modifies the residual vector to enforce Dirichlet boundary conditions
@@ -316,7 +317,7 @@ def apply_bc_vec(res_vec, dofs, problem, scale=1.0):
     return jax.flatten_util.ravel_pytree(res_list)[0]
 
 
-def apply_bc(res_fn, problem, scale=1.0):
+def apply_bc(res_fn: Callable[[np.ndarray], np.ndarray], problem: Any, scale: float = 1.0) -> Callable[[np.ndarray], np.ndarray]:
     """Create a boundary condition-aware residual function.
     
     Wraps a residual function to automatically apply Dirichlet boundary
@@ -342,7 +343,7 @@ def apply_bc(res_fn, problem, scale=1.0):
     return res_fn_bc
 
 
-def assign_bc(dofs, problem):
+def assign_bc(dofs: np.ndarray, problem: Any) -> np.ndarray:
     """Assign prescribed values to Dirichlet boundary condition DOFs.
     
     Sets the solution values at constrained degrees of freedom to their
@@ -364,7 +365,7 @@ def assign_bc(dofs, problem):
     return jax.flatten_util.ravel_pytree(sol_list)[0]
 
 
-def assign_ones_bc(dofs, problem):
+def assign_ones_bc(dofs: np.ndarray, problem: Any) -> np.ndarray:
     """Set Dirichlet boundary condition DOFs to unity values.
     
     Utility function that sets all constrained degrees of freedom to 1.0.
@@ -386,7 +387,7 @@ def assign_ones_bc(dofs, problem):
     return jax.flatten_util.ravel_pytree(sol_list)[0]
 
 
-def assign_zeros_bc(dofs, problem):
+def assign_zeros_bc(dofs: np.ndarray, problem: Any) -> np.ndarray:
     """Set Dirichlet boundary condition DOFs to zero values.
     
     Utility function that sets all constrained degrees of freedom to 0.0.
@@ -408,7 +409,7 @@ def assign_zeros_bc(dofs, problem):
     return jax.flatten_util.ravel_pytree(sol_list)[0]
 
 
-def copy_bc(dofs, problem):
+def copy_bc(dofs: np.ndarray, problem: Any) -> np.ndarray:
     """Extract boundary condition values to a new zero vector.
     
     Creates a new vector filled with zeros except at boundary condition
@@ -437,7 +438,7 @@ def copy_bc(dofs, problem):
     return jax.flatten_util.ravel_pytree(new_sol_list)[0]
 
 
-def get_flatten_fn(fn_sol_list, problem):
+def get_flatten_fn(fn_sol_list: Callable[[List[np.ndarray]], List[np.ndarray]], problem: Any) -> Callable[[np.ndarray], np.ndarray]:
     """Create a flattened version of a solution list function.
     
     Converts a function that operates on solution lists to one that operates
@@ -459,7 +460,7 @@ def get_flatten_fn(fn_sol_list, problem):
     return fn_dofs
 
 
-def operator_to_matrix(operator_fn, problem):
+def operator_to_matrix(operator_fn: Callable[[np.ndarray], np.ndarray], problem: Any) -> np.ndarray:
     """Convert a nonlinear operator to its Jacobian matrix.
     
     Computes the full Jacobian matrix of a nonlinear operator using automatic
@@ -483,7 +484,7 @@ def operator_to_matrix(operator_fn, problem):
     return J
 
 
-def linear_incremental_solver(problem, res_vec, A, dofs, solver_options):
+def linear_incremental_solver(problem: Any, res_vec: np.ndarray, A: PETSc.Mat, dofs: np.ndarray, solver_options: Dict[str, Any]) -> np.ndarray:
     """Solve linear system for Newton-Raphson increment.
     
     Computes the Newton increment by solving the linearized system at each
@@ -531,7 +532,7 @@ def linear_incremental_solver(problem, res_vec, A, dofs, solver_options):
     return dofs
 
 
-def line_search(problem, dofs, inc):
+def line_search(problem: Any, dofs: np.ndarray, inc: np.ndarray) -> np.ndarray:
     """Perform line search to optimize Newton step size.
     
     Implements a simple backtracking line search to find an optimal step size
@@ -589,7 +590,7 @@ def line_search(problem, dofs, inc):
     return dofs + alpha * inc
 
 
-def get_A(problem):
+def get_A(problem: Any) -> Union[PETSc.Mat, Tuple[PETSc.Mat, PETSc.Mat]]:
     """Construct PETSc matrix with boundary condition enforcement.
     
     Converts the assembled sparse matrix to PETSc format and applies
@@ -649,7 +650,7 @@ def get_A(problem):
     return A
 
 
-def solver(problem, solver_options={}):
+def solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.ndarray]:
     """Solve nonlinear finite element problem using Newton-Raphson method.
     
     Main nonlinear solver that implements Newton-Raphson iteration with multiple
@@ -812,7 +813,7 @@ def solver(problem, solver_options={}):
     return sol_list
 
 
-def implicit_vjp(problem, sol_list, params, v_list, adjoint_solver_options):
+def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: List[np.ndarray], adjoint_solver_options: Dict[str, Any]) -> Any:
     """Compute vector-Jacobian product using the adjoint method.
     
     Implements the adjoint method to efficiently compute gradients of functionals
@@ -895,7 +896,7 @@ def implicit_vjp(problem, sol_list, params, v_list, adjoint_solver_options):
     return vjp_result
 
 
-def ad_wrapper(problem, solver_options={}, adjoint_solver_options={}):
+def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}) -> Callable[[Any], List[np.ndarray]]:
     """Create automatic differentiation wrapper for the solver.
     
     Wraps the nonlinear solver with JAX's custom VJP (vector-Jacobian product)

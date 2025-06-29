@@ -34,7 +34,7 @@ import jax
 import jax.numpy as np
 import jax.flatten_util
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, List, Iterable
+from typing import Any, Callable, Optional, List, Iterable, Union, Tuple
 import functools
 import scipy
 from unitcellax.fem.mesh import Mesh
@@ -72,9 +72,9 @@ class DirichletBC:
         ... )
     """
 
-    subdomain: Callable
+    subdomain: Callable[[np.ndarray], bool]
     vec: int
-    eval: Callable
+    eval: Callable[[np.ndarray], float]
 
 
 @dataclass
@@ -119,18 +119,18 @@ class Problem:
         >>> problem = Problem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=bcs)
     """
 
-    mesh: Mesh
-    vec: int
+    mesh: Union[Mesh, List[Mesh]]
+    vec: Union[int, List[int]]
     dim: int
-    ele_type: str = "HEX8"
-    gauss_order: int = None
+    ele_type: Union[str, List[str]] = "HEX8"
+    gauss_order: Union[int, List[int], None] = None
     dirichlet_bcs: Optional[Iterable[DirichletBC]] = None
-    neumann_subdomains: Optional[List[Callable]] = None
+    neumann_subdomains: Optional[List[Callable[[np.ndarray], bool]]] = None
     additional_info: Any = ()
-    prolongation_matrix: Optional[np.ndarray] = None
+    prolongation_matrix: Optional[scipy.sparse.csr_matrix] = None
     macro_term: Optional[np.ndarray] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Initialize the finite element problem after dataclass construction.
 
         This method performs the heavy computational setup including:
@@ -309,7 +309,7 @@ class Problem:
         self.custom_init(*self.additional_info)
         self.pre_jit_fns()
 
-    def custom_init(self, *args):
+    def custom_init(self, *args: Any) -> None:
         """Custom initialization hook for subclasses.
 
         This method is called during __post_init__ and can be overridden by
@@ -325,7 +325,7 @@ class Problem:
         """
         pass
 
-    def get_laplace_kernel(self, tensor_map):
+    def get_laplace_kernel(self, tensor_map: Callable) -> Callable:
         """Create a kernel function for Laplace-type (gradient-based) weak forms.
 
         Generates a function that computes element-level contributions to the weak form
@@ -373,7 +373,7 @@ class Problem:
 
         return laplace_kernel
 
-    def get_mass_kernel(self, mass_map):
+    def get_mass_kernel(self, mass_map: Callable) -> Callable:
         """Create a kernel function for mass-type (solution-based) weak forms.
 
         Generates a function that computes element-level contributions to the weak form
@@ -418,7 +418,7 @@ class Problem:
 
         return mass_kernel
 
-    def get_surface_kernel(self, surface_map):
+    def get_surface_kernel(self, surface_map: Callable) -> Callable:
         """Create a kernel function for surface integral weak forms.
 
         Generates a function that computes face-level contributions to the weak form,
@@ -470,7 +470,7 @@ class Problem:
 
         return surface_kernel
 
-    def pre_jit_fns(self):
+    def pre_jit_fns(self) -> None:
         """Prepare and JIT-compile kernel functions for efficient computation.
 
         This method sets up the computational kernels for volume and surface integrals,
@@ -510,37 +510,48 @@ class Problem:
                 # TODO: If there is no kernel map, returning 0. is not a good choice.
                 # Return a zero array with proper shape will be better.
                 if hasattr(self, "get_mass_map"):
-                    mass_kernel = self.get_mass_kernel(self.get_mass_map())
-                    mass_val = mass_kernel(
-                        cell_sol_flat,
-                        physical_quad_points,
-                        cell_JxW,
-                        *cell_internal_vars,
-                    )
+                    mass_map = self.get_mass_map()
+                    if mass_map is not None:
+                        mass_kernel = self.get_mass_kernel(mass_map)
+                        mass_val = mass_kernel(
+                            cell_sol_flat,
+                            physical_quad_points,
+                            cell_JxW,
+                            *cell_internal_vars,
+                        )
+                    else:
+                        mass_val = 0.0
                 else:
                     mass_val = 0.0
 
                 if hasattr(self, "get_tensor_map"):
-                    laplace_kernel = self.get_laplace_kernel(self.get_tensor_map())
-                    laplace_val = laplace_kernel(
-                        cell_sol_flat,
-                        cell_shape_grads,
-                        cell_v_grads_JxW,
-                        *cell_internal_vars,
-                    )
+                    tensor_map = self.get_tensor_map()
+                    if tensor_map is not None:
+                        laplace_kernel = self.get_laplace_kernel(tensor_map)
+                        laplace_val = laplace_kernel(
+                            cell_sol_flat,
+                            cell_shape_grads,
+                            cell_v_grads_JxW,
+                            *cell_internal_vars,
+                        )
+                    else:
+                        laplace_val = 0.0
                 else:
                     laplace_val = 0.0
 
                 if hasattr(self, "get_universal_kernel"):
                     universal_kernel = self.get_universal_kernel()
-                    universal_val = universal_kernel(
-                        cell_sol_flat,
-                        physical_quad_points,
-                        cell_shape_grads,
-                        cell_JxW,
-                        cell_v_grads_JxW,
-                        *cell_internal_vars,
-                    )
+                    if universal_kernel is not None:
+                        universal_val = universal_kernel(
+                            cell_sol_flat,
+                            physical_quad_points,
+                            cell_shape_grads,
+                            cell_JxW,
+                            cell_v_grads_JxW,
+                            *cell_internal_vars,
+                        )
+                    else:
+                        universal_val = 0.0
                 else:
                     universal_val = 0.0
 
@@ -568,30 +579,36 @@ class Problem:
                 surface_kernel is from legacy JAX-FEM. It can still be used, but not mandatory.
                 """
                 if hasattr(self, "get_surface_maps"):
-                    surface_kernel = self.get_surface_kernel(
-                        self.get_surface_maps()[ind]
-                    )
-                    surface_val = surface_kernel(
-                        cell_sol_flat,
-                        physical_surface_quad_points,
-                        face_shape_vals,
-                        face_shape_grads,
-                        face_nanson_scale,
-                        *cell_internal_vars_surface,
-                    )
+                    surface_maps = self.get_surface_maps()
+                    if surface_maps is not None and ind < len(surface_maps) and surface_maps[ind] is not None:
+                        surface_kernel = self.get_surface_kernel(surface_maps[ind])
+                        surface_val = surface_kernel(
+                            cell_sol_flat,
+                            physical_surface_quad_points,
+                            face_shape_vals,
+                            face_shape_grads,
+                            face_nanson_scale,
+                            *cell_internal_vars_surface,
+                        )
+                    else:
+                        surface_val = 0.0
                 else:
                     surface_val = 0.0
 
                 if hasattr(self, "get_universal_kernels_surface"):
-                    universal_kernel = self.get_universal_kernels_surface()[ind]
-                    universal_val = universal_kernel(
-                        cell_sol_flat,
-                        physical_surface_quad_points,
-                        face_shape_vals,
-                        face_shape_grads,
-                        face_nanson_scale,
-                        *cell_internal_vars_surface,
-                    )
+                    universal_kernels_surface = self.get_universal_kernels_surface()
+                    if universal_kernels_surface is not None and ind < len(universal_kernels_surface) and universal_kernels_surface[ind] is not None:
+                        universal_kernel = universal_kernels_surface[ind]
+                        universal_val = universal_kernel(
+                            cell_sol_flat,
+                            physical_surface_quad_points,
+                            face_shape_vals,
+                            face_shape_grads,
+                            face_nanson_scale,
+                            *cell_internal_vars_surface,
+                        )
+                    else:
+                        universal_val = 0.0
                 else:
                     universal_val = 0.0
 
@@ -634,8 +651,8 @@ class Problem:
             self.kernel_jac_face.append(kernel_jac_face)
 
     def split_and_compute_cell(
-        self, cells_sol_flat, np_version, jac_flag, internal_vars
-    ):
+        self, cells_sol_flat: np.ndarray, np_version: bool, jac_flag: bool, internal_vars: List[Any]
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], List[Any]]:
         """Compute volume integrals in the weak form with memory-efficient batching.
 
         Evaluates element-level residuals and optionally Jacobians for all cells in the mesh.
@@ -684,8 +701,13 @@ class Problem:
                 val, jac = vmap_fn(*input_col)
                 values.append(val)
                 jacs.append(jac)
-            values = np_version.vstack(values)
-            jacs = np_version.vstack(jacs)
+            # Handle traced arrays during vmap/autodiff by using JAX operations
+            if values and hasattr(values[0], '_trace'):
+                values = np.vstack(values)
+                jacs = np.vstack(jacs) if jacs else jacs
+            else:
+                values = np_version.vstack(values)
+                jacs = np_version.vstack(jacs)
 
             return values, jacs
         else:
@@ -703,7 +725,11 @@ class Problem:
 
                 val = vmap_fn(*input_col)
                 values.append(val)
-            values = np_version.vstack(values)
+            # Handle traced arrays during vmap/autodiff by using JAX operations
+            if values and hasattr(values[0], '_trace'):
+                values = np.vstack(values)
+            else:
+                values = np_version.vstack(values)
             return values
 
     def compute_face(
@@ -767,7 +793,7 @@ class Problem:
                 values.append(val)
             return values
 
-    def compute_residual_vars_helper(self, weak_form_flat, weak_form_face_flat):
+    def compute_residual_vars_helper(self, weak_form_flat: List[np.ndarray], weak_form_face_flat: List[np.ndarray]) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """Assemble global residual from element and face contributions.
 
         Accumulates element-level weak form contributions into global residual vectors
@@ -806,7 +832,7 @@ class Problem:
 
         return res_list
 
-    def compute_residual_vars(self, sol_list, internal_vars, internal_vars_surfaces):
+    def compute_residual_vars(self, sol_list: List[np.ndarray], internal_vars: List[Any], internal_vars_surfaces: List[Any]) -> Tuple[List[np.ndarray], List[Any], List[Any]]:
         """Compute residual vectors with specified internal variables.
 
         Lower-level interface for residual computation that allows specifying
@@ -835,7 +861,7 @@ class Problem:
         )  # [(num_selected_faces, num_nodes*vec + ...), ...]
         return self.compute_residual_vars_helper(weak_form_flat, weak_form_face_flat)
 
-    def compute_newton_vars(self, sol_list, internal_vars, internal_vars_surfaces):
+    def compute_newton_vars(self, sol_list: List[np.ndarray], internal_vars: List[Any], internal_vars_surfaces: List[Any]) -> Tuple[List[np.ndarray], List[Any], List[Any]]:
         """Compute residual and Jacobian with specified internal variables.
 
         Lower-level interface for Newton step computation that allows specifying
@@ -861,7 +887,11 @@ class Problem:
         weak_form_flat, cells_jac_flat = self.split_and_compute_cell(
             cells_sol_flat, onp, True, internal_vars
         )
-        self.V = onp.array(cells_jac_flat.reshape(-1))
+        # Handle traced arrays during vmap/autodiff
+        if hasattr(cells_jac_flat, '_trace'):
+            self.V = cells_jac_flat.reshape(-1)  # Keep as JAX array for traced computation
+        else:
+            self.V = onp.array(cells_jac_flat.reshape(-1))
 
         # [(num_selected_faces, num_nodes*vec + ...,), ...], [(num_selected_faces, num_nodes*vec + ..., num_nodes*vec + ...,), ...]
         weak_form_face_flat, cells_jac_face_flat = self.compute_face(
@@ -872,7 +902,7 @@ class Problem:
 
         return self.compute_residual_vars_helper(weak_form_flat, weak_form_face_flat)
 
-    def compute_residual(self, sol_list):
+    def compute_residual(self, sol_list: List[np.ndarray]) -> List[np.ndarray]:
         """Compute the residual vector for the current solution.
 
         Evaluates the weak form residual R(u) = 0 for the given solution.
@@ -890,7 +920,7 @@ class Problem:
             sol_list, self.internal_vars, self.internal_vars_surfaces
         )
 
-    def newton_update(self, sol_list):
+    def newton_update(self, sol_list: List[np.ndarray]) -> List[np.ndarray]:
         """Compute residual and Jacobian for Newton-Raphson iteration.
 
         Performs the core computation for Newton's method by evaluating both the
@@ -912,7 +942,7 @@ class Problem:
             sol_list, self.internal_vars, self.internal_vars_surfaces
         )
 
-    def set_params(self, params):
+    def set_params(self, params: Any) -> None:
         """Set problem parameters for inverse problems and optimization.
 
         This method updates problem parameters (e.g., material properties, geometry)

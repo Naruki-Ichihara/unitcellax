@@ -19,6 +19,8 @@ Example:
 """
 
 import os
+from typing import Callable, Dict, Tuple, Union
+
 import gmsh
 import numpy as onp
 import meshio
@@ -47,7 +49,7 @@ class Mesh:
         preferable for complex mesh operations.
     """
 
-    def __init__(self, points, cells, ele_type="TET4"):
+    def __init__(self, points: onp.ndarray, cells: onp.ndarray, ele_type: str = "TET4") -> None:
         """Initialize a finite element mesh.
 
         Args:
@@ -64,11 +66,11 @@ class Mesh:
             specified element type (important for debugging).
         """
         # TODO (Very important for debugging purpose!): Assert that cells must have correct orders
-        self.points = points
-        self.cells = cells
-        self.ele_type = ele_type
+        self.points: onp.ndarray = points
+        self.cells: onp.ndarray = cells
+        self.ele_type: str = ele_type
 
-    def count_selected_faces(self, location_fn):
+    def count_selected_faces(self, location_fn: Callable[[onp.ndarray], bool]) -> int:
         """Given location functions, compute the count of faces that satisfy the location function.
 
         Useful for setting up distributed load conditions.
@@ -96,7 +98,7 @@ class Mesh:
         return boundary_inds.shape[0]
 
 
-def get_meshio_cell_type(ele_type):
+def get_meshio_cell_type(ele_type: str) -> str:
     """Convert element type identifier to meshio cell type string.
 
     This function maps internal element type identifiers used in the finite element
@@ -146,7 +148,7 @@ def get_meshio_cell_type(ele_type):
     return cell_type
 
 
-def box_mesh(Nx, Ny, Nz, domain_x, domain_y, domain_z, ele_type="HEX8"):
+def box_mesh(Nx: int, Ny: int, Nz: int, domain_x: float, domain_y: float, domain_z: float, ele_type: str = "HEX8") -> 'Mesh':
     """Generate a structured 3D rectangular mesh using hexahedral elements.
 
     Creates a regular grid of hexahedral elements within a rectangular domain.
@@ -205,7 +207,7 @@ def box_mesh(Nx, Ny, Nz, domain_x, domain_y, domain_z, ele_type="HEX8"):
     return out_mesh
 
 
-def rectangle_mesh(Nx, Ny, domain_x, domain_y):
+def rectangle_mesh(Nx: int, Ny: int, domain_x: float, domain_y: float) -> meshio.Mesh:
     """Generate a structured 2D rectangular mesh using quadrilateral elements.
 
     Creates a regular grid of quadrilateral elements within a rectangular domain.
@@ -249,7 +251,7 @@ def rectangle_mesh(Nx, Ny, domain_x, domain_y):
     return out_mesh
 
 
-def check_mesh_quality(mesh):
+def check_mesh_quality(mesh: 'Mesh') -> Dict[str, Union[float, int]]:
     """Perform basic quality checks on a finite element mesh.
 
     Evaluates basic mesh quality metrics including element volumes/areas,
