@@ -162,6 +162,94 @@ pytest tests/ -vv --tb=short
 - **Package Structure**: unitcellax package import and versioning
 - **Basis Functions**: Element configuration, shape functions, face quadrature, reordering
 
+## Computational Architecture
+
+unitcellax follows a modular finite element framework with the following key architectural layers:
+
+### Core Computational Pipeline
+
+1. **Mesh Generation** (`unitcellax/fem/mesh.py`): Creates structured meshes for unit cells
+2. **Finite Element Basis** (`unitcellax/fem/basis.py`): Shape functions, quadrature, element types (HEX8, TET4, etc.)
+3. **Problem Definition** (`unitcellax/fem/problem.py`): Abstract FE problem class with weak form assembly
+4. **Physics Implementation** (`unitcellax/physics.py`): Concrete physics like LinearElasticity
+5. **Solver** (`unitcellax/fem/solver.py`): Newton-Raphson with multiple linear solver backends
+6. **Optimization** (`unitcellax/optimizers.py`): NLopt-based algorithms with JAX integration
+
+### Key Workflow Components
+
+**Unit Cell Definition:**
+```python
+from unitcellax.unitcell import UnitCell
+from unitcellax.fem.mesh import box_mesh
+
+class MyUnitCell(UnitCell):
+    def mesh_build(self):
+        return box_mesh(N, N, N, L, L, L, "HEX8")
+```
+
+**Physics Problem Setup:**
+```python
+from unitcellax.physics import LinearElasticity
+from unitcellax.fem.solver import ad_wrapper
+
+problem = LinearElasticity(mesh=mesh, E=70e3, nu=0.3)
+solver = ad_wrapper(problem, solver_options={'jax_solver': {}})
+```
+
+**Optimization Loop:**
+```python
+from unitcellax.optimizers import GCMMAOptimizer
+
+optimizer = GCMMAOptimizer(
+    n_vars=n_design_vars,
+    objective_fn=compliance_function,
+    volume_constraint_fn=volume_constraint
+)
+```
+
+### Automatic Differentiation Strategy
+
+- **Forward Problems**: Use standard solver with PETSc backend for robustness
+- **Gradient Computation**: JAX autodiff through `ad_wrapper` with implicit differentiation
+- **Optimization**: NLopt algorithms (LD_MMA/GCMMA) with JAX gradient computation
+- **Memory Management**: Automatic JAX cache clearing and garbage collection
+
+### Solver Backend Selection
+
+The solver supports multiple backends chosen via `solver_options`:
+- `'jax_solver'`: JAX iterative solver (BICGSTAB with Jacobi preconditioning)
+- `'petsc_solver'`: PETSc iterative solvers (BCGSL, GMRES, etc.)
+- `'umfpack_solver'`: SciPy direct solver (UMFPACK)
+
+**Important:** Use scipy sparse matrices (not JAX BCOO) for compatibility with PETSc operations.
+
+## Examples and Usage Patterns
+
+The `examples/` directory contains complete workflows:
+
+- `multiload_topopt.py`: Multi-load case topology optimization with sequential solving
+- `elasticity_topopt.py`: Single-load topology optimization 
+- `homogenization_elasticity.py`: Material homogenization
+
+### Running Examples
+
+```bash
+# Inside container, run topology optimization example
+python examples/elasticity_topopt.py
+
+# Multi-load case optimization (sequential solving)
+python examples/multiload_topopt.py
+
+# Material homogenization
+python examples/homogenization_elasticity.py
+```
+
+### Optimization Constraints
+
+- **NLopt Integration**: The codebase uses only NLopt for optimization (original MMA implementation removed)
+- **JAX Compatibility**: Sequential solving for multiple load cases (vmap incompatible with PETSc)
+- **Memory Efficiency**: Automatic cleanup prevents JAX memory accumulation during optimization
+
 ### Claude Code Integration
 
 The container can optionally include Claude Code by setting `INSTALL_CLAUDE: "true"` in docker-compose.yml. This installs Node.js and the Claude Code CLI within the container environment.
