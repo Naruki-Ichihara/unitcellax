@@ -200,7 +200,16 @@ def petsc_solve(A: PETSc.Mat, b: np.ndarray, ksp_type: str, pc_type: str) -> np.
     logger.debug(f"PETSc Solver - Finished solving, linear solve res = {err}")
     assert err < 0.1, f"PETSc linear solver failed to converge, err = {err}"
 
-    return x.getArray()
+    # Get solution array before cleanup
+    solution = x.getArray().copy()  # Make a copy to prevent memory issues
+    
+    # Properly destroy PETSc objects to prevent memory leaks
+    rhs.destroy()
+    x.destroy()
+    y.destroy()
+    ksp.destroy()
+    
+    return solution
 
 
 def linear_solver(A: PETSc.Mat, b: np.ndarray, x0: np.ndarray, solver_options: Dict[str, Any]) -> np.ndarray:
@@ -882,9 +891,13 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
         v_vec = problem.prolongation_matrix.T @ v_vec
 
     # Be careful that A.transpose() does in-place change to A
+    # Create a copy to avoid in-place modification
+    A_reduced_T = A_reduced.transpose()
     adjoint_vec = linear_solver(
-        A_reduced.transpose(), v_vec, None, adjoint_solver_options
+        A_reduced_T, v_vec, None, adjoint_solver_options
     )
+    # Clean up transposed matrix
+    A_reduced_T.destroy()
 
     if problem.prolongation_matrix is not None:
         adjoint_vec = problem.prolongation_matrix @ adjoint_vec
@@ -892,6 +905,10 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
     vjp_linear_fn = get_vjp_contraint_fn_params(params, sol_list)
     vjp_result = vjp_linear_fn(problem.unflatten_fn_sol_list(adjoint_vec))
     vjp_result = jax.tree_map(lambda x: -x, vjp_result)
+    
+    # Clean up PETSc matrices
+    A.destroy()
+    A_reduced.destroy()
 
     return vjp_result
 

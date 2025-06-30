@@ -49,34 +49,56 @@ class JAXOptimizer(ABC):
         pass
     
     def _jax_to_numpy(self, jax_array):
-        """Convert JAX array to numpy to break autograd references.
+        """Convert JAX array to numpy to break autograd references and prevent memory leaks.
         
         Args:
             jax_array: JAX array to convert.
             
         Returns:
-            np.ndarray: Converted numpy array.
+            np.ndarray: Converted numpy array with memory leak prevention.
         """
-        # Handle traced arrays from vmap more robustly
+        # Prevent memory leaks by properly handling JAX to numpy conversion
         try:
-            # First try to stop gradient if it's a traced array
-            if hasattr(jax_array, '_trace') or str(type(jax_array)).startswith('<class \'jax'):
-                jax_array = jax.lax.stop_gradient(jax_array)
-            return onp.asarray(jax_array)
-        except Exception:
-            # If conversion fails, it might be a traced array in vmap
-            # Use jax.device_get as a fallback
+            # Stop gradient computation to break autograd tape
+            jax_array = jax.lax.stop_gradient(jax_array)
+            
+            # Use device_get to move from device and convert to numpy
+            # This ensures memory is properly released
+            numpy_array = jax.device_get(jax_array)
+            
+            # Create a copy to ensure complete separation from JAX memory
+            result = onp.array(numpy_array, copy=True)
+            
+            # Explicitly delete intermediate references
+            del numpy_array
+            
+            return result
+            
+        except Exception as e:
+            # Fallback for edge cases
             try:
-                return onp.asarray(jax.device_get(jax.lax.stop_gradient(jax_array)))
+                # For scalar values
+                if hasattr(jax_array, 'ndim') and jax_array.ndim == 0:
+                    return float(jax_array)
+                # For arrays, force copy
+                return onp.array(jax_array, copy=True)
             except Exception:
-                # Last resort - just return the value without gradient tracking
-                return float(jax_array) if jax_array.ndim == 0 else onp.array(jax_array)
+                # Last resort
+                return float(jax_array) if hasattr(jax_array, 'ndim') and jax_array.ndim == 0 else onp.array(jax_array)
     
     def _periodic_cleanup(self):
         """Perform periodic memory cleanup to prevent accumulation."""
         self.epoch_counter += 1
         if self.epoch_counter % self.memory_cleanup_freq == 0:
+            print("!!Cache clear")
+            # Clear JAX compilation cache
+            if hasattr(jax._src.interpreters.xla, '_xla_callable'):
+                jax._src.interpreters.xla._xla_callable.cache_clear()
+            # Clear all JAX caches
             jax.clear_caches()
+            # Force garbage collection
+            gc.collect()
+            gc.collect()
             gc.collect()
 
 
@@ -118,7 +140,7 @@ class NLoptJAXOptimizer(JAXOptimizer, nlopt.opt):
             self.add_inequality_constraint(self._constraint_wrapper(constraint_fn), tolerance)
     
     def _objective_wrapper(self, x: onp.ndarray, grad: onp.ndarray) -> float:
-        """Internal wrapper for objective function with JAX handling.
+        """Internal wrapper for objective function with JAX handling and memory leak prevention.
         
         Args:
             x (np.ndarray): Current parameter values.
@@ -127,21 +149,34 @@ class NLoptJAXOptimizer(JAXOptimizer, nlopt.opt):
         Returns:
             float: Objective function value.
         """
-        J, dJ = jax.value_and_grad(self.objective_fn)(x)
+        # Ensure x is a proper numpy array to prevent JAX memory references
+        x_copy = onp.array(x, copy=True)
         
-        # Convert JAX arrays to numpy to break autograd references
+        # Compute objective and gradient
+        J, dJ = jax.value_and_grad(self.objective_fn)(x_copy)
+        
+        # Convert JAX arrays to numpy with proper memory management
         J_np = float(self._jax_to_numpy(J))
         dJ_np = self._jax_to_numpy(dJ)
         
         if grad.size > 0:
-            grad[:] = dJ_np
+            grad[:] = dJ_np.copy()  # Ensure a copy is made
             
+        # Explicitly delete intermediate JAX arrays to prevent leaks
+        del J, dJ
+        
         # Save visualization if callback provided
         if self.save_callback:
-            self.save_callback(x, self.epoch_counter)
+            self.save_callback(x_copy, self.epoch_counter)
             
         # Periodic memory cleanup
         self._periodic_cleanup()
+        
+        # Delete copies to ensure cleanup
+        del x_copy, dJ_np
+        
+        # Force immediate garbage collection for critical arrays
+        gc.collect(0)
             
         print(f"Objective: {J_np:.6e}")
         return J_np
@@ -156,14 +191,20 @@ class NLoptJAXOptimizer(JAXOptimizer, nlopt.opt):
             Callable: Wrapped constraint function.
         """
         def wrapper(x: onp.ndarray, grad: onp.ndarray) -> float:
-            c, gradc = jax.value_and_grad(constraint_fn)(x)
+            # Ensure x is a proper numpy array to prevent JAX memory references
+            x_copy = onp.array(x, copy=True)
             
-            # Convert JAX arrays to numpy to break autograd references
+            c, gradc = jax.value_and_grad(constraint_fn)(x_copy)
+            
+            # Convert JAX arrays to numpy with proper memory management
             c_np = float(self._jax_to_numpy(c))
             gradc_np = self._jax_to_numpy(gradc)
             
             if grad.size > 0:
                 grad[:] = gradc_np
+            
+            # Explicitly delete intermediate JAX arrays to prevent leaks
+            del c, gradc, x_copy, gradc_np
                 
             print(f"Constraint: {c_np:.6e}")
             return c_np

@@ -80,7 +80,8 @@ class UnitCell(ABC):
             # Handle empty mesh case
             self.lb = np.array([0.0] * self.points.shape[1])
             self.ub = np.array([1.0] * self.points.shape[1])
-        
+
+        self.num_dims = self.points.shape[1] if self.points.shape[0] > 0 else len(self.lb)
         logger.debug(f"Number of points: {self.points.shape[0]}")
         logger.debug(f"Unit cell bounds: {self.lb} to {self.ub}")
 
